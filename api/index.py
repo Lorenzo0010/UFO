@@ -197,7 +197,7 @@ async def manifest():
         "id": "org.stremio.mammamia.ufo",
         "version": "1.3.1",
         "name": ADDON_NAME,
-        "description": "VixSrc Stream via Vercel",
+        "description": "VixSrc Stream",
         "logo": ADDON_LOGO,
         "resources": ["stream"],
         "types": ["movie", "series"],
