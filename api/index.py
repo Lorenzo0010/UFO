@@ -1,13 +1,15 @@
+import json
 import logging
 import re
 import os
+from typing import Dict, Optional, Any
 from curl_cffi.requests import AsyncSession
 from bs4 import BeautifulSoup
 from fake_headers import Headers
 from dotenv import load_dotenv
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse, HTMLResponse
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from slowapi import Limiter
 from slowapi.util import get_remote_address
@@ -16,124 +18,147 @@ from slowapi.middleware import SlowAPIMiddleware
 load_dotenv()
 
 # ============================================================================
-# CONFIGURAZIONE
+# CONFIGURAZIONE ADATTATA PER VERCEL
 # ============================================================================
-ADDON_NAME = "UFO Addon"
-ADDON_VERSION = "1.3.3"
+ADDON_NAME = "UFO addon"
 ADDON_LOGO = "https://static.vecteezy.com/system/resources/thumbnails/050/270/611/small/ufo-logo-design-no-background-perfect-for-print-on-demand-t-shirt-design-png.png"
-TMDB_API_KEY = os.getenv('TMDB_KEY', '536b1c46da222eb34b69d168f092b495')
-TARGET_URL = "https://vixsrc.to"
+
+# Configurazioni statiche (senza file json)
+CONFIG = {
+    "Siti": {
+        "StreamingCommunity": {
+            "url": "https://vixsrc.to",
+            "enabled": "1"
+        }
+    }
+}
 
 # LOGGING
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(message)s")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-# LIMITER (Per evitare troppe richieste)
-limiter = Limiter(key_func=get_remote_address)
+# UTILITIES
+User_Agent = "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:127.0) Gecko/20100101 Firefox/127.0"
+TMDB_API_KEY = os.getenv('TMDB_KEY', '536b1c46da222eb34b69d168f092b495')
 
-# UTILS
-async def get_tmdb_id(imdb_id: str, client: AsyncSession) -> str | None:
-    # Se è già un numero (ID TMDB), lo restituiamo direttamente
-    if not imdb_id.startswith("tt"):
-        return imdb_id
-    
-    # Se è un ID IMDB (tt...), chiediamo a TMDB
+def clean_id(id_str: str) -> str:
+    return id_str.split(':')[0] if ':' in id_str else id_str
+
+async def get_tmdb_id_from_imdb(imdb_id: str, client: AsyncSession) -> Optional[int]:
     try:
-        res = await client.get(
+        response = await client.get(
             f"https://api.themoviedb.org/3/find/{imdb_id}",
-            params={"external_source": "imdb_id", "api_key": TMDB_API_KEY},
-            timeout=5
+            params={"external_source": "imdb_id", "api_key": TMDB_API_KEY, "language": "it"},
+            timeout=10
         )
-        if res.status_code == 200:
-            data = res.json()
-            if data.get('movie_results'): return str(data['movie_results'][0]['id'])
-            if data.get('tv_results'): return str(data['tv_results'][0]['id'])
+        if response.status_code == 200:
+            data = response.json()
+            if data.get('movie_results'): return data['movie_results'][0].get('id')
+            if data.get('tv_results'): return data['tv_results'][0].get('id')
+        return None
     except Exception as e:
-        logger.error(f"TMDB Error: {e}")
-    return None
+        logger.error(f"❌ Error converting IMDb ID: {e}")
+        return None
 
 # ============================================================================
-# EXTRACTOR LOGIC
+# EXTRACTOR
 # ============================================================================
-class VixExtractor:
+class StreamingCommunityExtractor:
     def __init__(self):
-        self.headers_gen = Headers(browser="chrome", os="win", headers=True)
+        self.domain = CONFIG['Siti']['StreamingCommunity']['url']
+        self.random_headers = Headers()
 
-    async def get_stream_url(self, direct_link: str, client: AsyncSession) -> str | None:
+    async def extract_vixcloud_url(self, link: str, client: AsyncSession) -> Optional[str]:
         try:
-            headers = self.headers_gen.generate()
-            headers['Referer'] = f"{TARGET_URL}/"
+            logger.info(f"🔍 Fetching: {link}")
+            headers = self.random_headers.generate()
+            headers['Referer'] = f"{self.domain}/"
+            headers['User-Agent'] = User_Agent
             
-            response = await client.get(direct_link, headers=headers, timeout=10)
-            if response.status_code != 200: return None
+            response = await client.get(link, headers=headers, timeout=15)
+            if response.status_code != 200:
+                return None
 
             soup = BeautifulSoup(response.text, "lxml")
             scripts = soup.find_all("script")
             
             for script in scripts:
-                if not script.string or "token" not in script.string: continue
-                
-                txt = script.string
-                token = re.search(r"'token':\s*'(\w+)'", txt)
-                expires = re.search(r"'expires':\s*'(\d+)'", txt)
-                url_src = re.search(r"url:\s*'([^']+)'", txt)
-
-                if token and expires and url_src:
-                    base_url = url_src.group(1)
-                    sep = "&" if "?" in base_url else "?"
-                    final_url = f"{base_url}{sep}token={token.group(1)}&expires={expires.group(1)}"
+                if not script.string: continue
+                if "token" in script.string and "expires" in script.string:
+                    video_data = script.string
+                    token_match = re.search(r"'token':\s*'(\w+)'", video_data)
+                    expires_match = re.search(r"'expires':\s*'(\d+)'", video_data)
+                    url_match = re.search(r"url:\s*'([^']+)'", video_data)
                     
-                    if "b=1" not in final_url: final_url += "&b=1"
-                    if "window.canPlayFHD = true" in txt: final_url += "&h=1"
-                    
-                    if ".m3u8" not in final_url:
-                        parts = final_url.split("?", 1)
-                        final_url = f"{parts[0]}.m3u8?{parts[1]}" if len(parts) > 1 else f"{final_url}.m3u8"
+                    if all([token_match, expires_match, url_match]):
+                        token = token_match.group(1)
+                        expires = expires_match.group(1)
+                        server_url = url_match.group(1)
                         
-                    return final_url
+                        separator = "&" if "?" in server_url else "?"
+                        final_url = f"{server_url}{separator}token={token}&expires={expires}"
+                        
+                        if "?b=1" in server_url and "b=1" not in final_url: final_url += "&b=1"
+                        if "window.canPlayFHD = true" in video_data: final_url += "&h=1"
+                        
+                        if ".m3u8" not in final_url:
+                             if "?" in final_url:
+                                 base, params = final_url.split("?", 1)
+                                 if not base.endswith(".m3u8"): final_url = f"{base}.m3u8?{params}"
+                             else:
+                                 final_url += ".m3u8"
+                        return final_url
             return None
         except Exception as e:
-            logger.error(f"Extraction Error: {e}")
+            logger.error(f"❌ Extractor Error: {e}")
             return None
 
-    async def handle_request(self, stream_type: str, stream_id: str) -> dict:
-        streams = []
+    async def get_streams(self, id: str, client: AsyncSession) -> Dict:
+        streams = {'streams': []}
         try:
-            parts = stream_id.split(':')
-            content_id = parts[0]
-            season = parts[1] if len(parts) > 1 else None
-            episode = parts[2] if len(parts) > 2 else None
+            is_series = False
+            season = None
+            episode = None
+            content_id = clean_id(id)
+            
+            if ':' in id:
+                parts = id.split(':')
+                content_id = parts[0]
+                if len(parts) >= 3:
+                    season, episode = parts[1], parts[2]
+                    is_series = True
 
-            async with AsyncSession() as client:
-                tmdb_id = await get_tmdb_id(content_id, client)
-                if not tmdb_id: return {"streams": []}
+            tmdb_id = None
+            if content_id.startswith('tt'):
+                tmdb_id = await get_tmdb_id_from_imdb(content_id, client)
+                if not tmdb_id: return streams
+            else:
+                try: tmdb_id = int(content_id)
+                except ValueError: return streams
 
-                path = f"/movie/{tmdb_id}/" if stream_type == "movie" else f"/tv/{tmdb_id}/{season}/{episode}/"
-                full_url = f"{TARGET_URL}{path}"
-                
-                decoded_url = await self.get_stream_url(full_url, client)
-                
-                if decoded_url:
-                    streams.append({
-                        "name": f"🛸 {ADDON_NAME}",
-                        "title": "VixCloud Source (720p/1080p)",
-                        "url": decoded_url,
-                        "behaviorHints": {
-                            "notWebReady": True,
-                            "proxyHeaders": {"request": {"User-Agent": "Mozilla/5.0"}}
-                        }
-                    })
+            url = f'{self.domain}/tv/{tmdb_id}/{season}/{episode}/' if is_series else f'{self.domain}/movie/{tmdb_id}/'
+            stream_url = await self.extract_vixcloud_url(url, client)
+            
+            if stream_url:
+                streams['streams'].append({
+                    "name": "🛸UFO",
+                    "title": f"{self.domain}",
+                    "url": stream_url,
+                    "behaviorHints": {
+                        "proxyHeaders": {"request": {"user-agent": User_Agent}},
+                        "notWebReady": True,
+                        "bingeGroup": "streamingcommunity"
+                    }
+                })
         except Exception as e:
-            logger.error(f"Handler Error: {e}")
-        
-        return {"streams": streams}
+            logger.error(f"❌ Stream Error: {e}")
+        return streams
 
 # ============================================================================
-# FASTAPI APP
+# FASTAPI SETUP
 # ============================================================================
-app = FastAPI(title=ADDON_NAME, docs_url=None, redoc_url=None)
-app.state.limiter = limiter
-app.add_middleware(SlowAPIMiddleware)
+app = FastAPI(title=f"{ADDON_NAME} Addon")
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -142,81 +167,68 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-extractor = VixExtractor()
+limiter = Limiter(key_func=get_remote_address)
+app.state.limiter = limiter
+app.add_middleware(SlowAPIMiddleware)
+extractor = StreamingCommunityExtractor()
 
-# ---------------------------------------------------------
-# ROTTA PRINCIPALE (LANDING PAGE HTML)
-# ---------------------------------------------------------
-@app.get("/", response_class=HTMLResponse)
+def respond_with(data: Any) -> JSONResponse:
+    resp = JSONResponse(content=data)
+    resp.headers["Access-Control-Allow-Origin"] = "*"
+    resp.headers["Access-Control-Allow-Headers"] = "*"
+    return resp
+
+# ============================================================================
+# ROUTES
+# ============================================================================
+@app.get("/")
 async def root(request: Request):
+    # Rilevamento automatico dell'URL
     base_url = str(request.base_url).rstrip("/")
-    manifest_url = f"{base_url}/manifest.json"
-    stremio_url = manifest_url.replace("https://", "stremio://").replace("http://", "stremio://")
+    return respond_with({
+        "status": "online",
+        "addon": ADDON_NAME,
+        "manifest": f"{base_url}/U0MQ/manifest.json"
+    })
 
-    html_content = f"""
-    <!DOCTYPE html>
-    <html lang="it">
-    <head>
-        <meta charset="UTF-8">
-        <title>{ADDON_NAME}</title>
-        <meta name="viewport" content="width=device-width, initial-scale=1">
-        <style>
-            body {{ font-family: 'Segoe UI', sans-serif; background-color: #0f0f0f; color: #fff; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }}
-            .card {{ background: #1a1a1a; padding: 2rem; border-radius: 12px; box-shadow: 0 8px 24px rgba(0,0,0,0.5); text-align: center; max-width: 400px; width: 90%; border: 1px solid #333; }}
-            img {{ width: 80px; margin-bottom: 1.5rem; }}
-            h1 {{ font-size: 1.5rem; margin: 0 0 0.5rem; color: #fff; }}
-            p {{ color: #888; margin-bottom: 2rem; font-size: 0.9rem; }}
-            .btn {{ display: block; width: 100%; padding: 0.8rem 0; background: #6c5ce7; color: white; text-decoration: none; border-radius: 8px; font-weight: 600; transition: background 0.2s; border: none; cursor: pointer; }}
-            .btn:hover {{ background: #5b4cc4; }}
-            .link-box {{ margin-top: 1.5rem; padding: 0.8rem; background: #000; border: 1px solid #333; border-radius: 6px; word-break: break-all; font-family: monospace; font-size: 0.8rem; color: #00b894; user-select: all; }}
-            .label {{ font-size: 0.75rem; color: #555; margin-top: 1.5rem; margin-bottom: 0.5rem; display: block; }}
-        </style>
-    </head>
-    <body>
-        <div class="card">
-            <img src="{ADDON_LOGO}" alt="UFO Logo">
-            <h1>{ADDON_NAME}</h1>
-            <p>Addon per Stremio configurato correttamente.</p>
-            
-            <a class="btn" href="{stremio_url}">🚀 Installa su Stremio</a>
-            
-            <span class="label">Oppure copia questo link manualmente:</span>
-            <div class="link-box">{manifest_url}</div>
-        </div>
-    </body>
-    </html>
-    """
-    return HTMLResponse(content=html_content)
-
-# ---------------------------------------------------------
-# MANIFEST
-# ---------------------------------------------------------
-@app.get("/manifest.json")
-async def get_manifest():
-    return JSONResponse(content={
-        "id": "org.stremio.ufo.addon",
-        "version": ADDON_VERSION,
+@app.get("/U0MQ/manifest.json")
+async def manifest():
+    config = {
+        "id": "org.stremio.mammamia.ufo",
+        "version": "1.3.1",
         "name": ADDON_NAME,
-        "description": "Stream from VixSrc",
+        "description": "VixSrc Stream via Vercel",
         "logo": ADDON_LOGO,
         "resources": ["stream"],
         "types": ["movie", "series"],
         "catalogs": [],
-        "idPrefixes": ["tt", "tmdb"]
-    }, headers={"Access-Control-Allow-Origin": "*"})
+        "behaviorHints": {"configurable": False}
+    }
+    return respond_with(config)
 
-# ---------------------------------------------------------
-# STREAMS
-# ---------------------------------------------------------
-@app.get("/stream/{type}/{id}.json")
-@limiter.limit("5/second")
-async def get_streams(request: Request, type: str, id: str):
-    if type not in ["movie", "series"]:
-        raise HTTPException(status_code=400, detail="Invalid type")
-    
-    data = await extractor.handle_request(type, id)
-    return JSONResponse(content=data, headers={"Access-Control-Allow-Origin": "*"})
+@app.get("/U0MQ/stream/{type}/{id}.json")
+@limiter.limit("10/second")
+async def streams(request: Request, type: str, id: str):
+    try:
+        if type not in ["movie", "series"]: raise HTTPException(status_code=404)
+        async with AsyncSession() as client:
+            streams_data = await extractor.get_streams(id, client)
+        if not streams_data: streams_data = {"streams": []}
+        return respond_with(streams_data)
+    except Exception:
+        return respond_with({"streams": []})
 
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=7860)
+@app.get("/U0MQ/meta/{type}/{id}.json")
+async def meta(type: str, id: str):
+    return respond_with({
+        "meta": {
+            "id": id,
+            "type": type,
+            "name": ADDON_NAME,
+            "poster": ADDON_LOGO
+        }
+    })
+
+@app.get("/U0MQ/catalog/{type}/{id}.json")
+async def catalog(type: str, id: str):
+    return respond_with({"metas": []})
