@@ -7,7 +7,7 @@ from fake_headers import Headers
 from dotenv import load_dotenv
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from slowapi import Limiter
 from slowapi.util import get_remote_address
@@ -19,7 +19,7 @@ load_dotenv()
 # CONFIGURAZIONE
 # ============================================================================
 ADDON_NAME = "UFO Addon"
-ADDON_VERSION = "1.3.2"
+ADDON_VERSION = "1.3.3"
 ADDON_LOGO = "https://static.vecteezy.com/system/resources/thumbnails/050/270/611/small/ufo-logo-design-no-background-perfect-for-print-on-demand-t-shirt-design-png.png"
 TMDB_API_KEY = os.getenv('TMDB_KEY', '536b1c46da222eb34b69d168f092b495')
 TARGET_URL = "https://vixsrc.to"
@@ -28,21 +28,26 @@ TARGET_URL = "https://vixsrc.to"
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-# UTILS
+# LIMITER (Per evitare troppe richieste)
 limiter = Limiter(key_func=get_remote_address)
 
+# UTILS
 async def get_tmdb_id(imdb_id: str, client: AsyncSession) -> str | None:
+    # Se è già un numero (ID TMDB), lo restituiamo direttamente
     if not imdb_id.startswith("tt"):
         return imdb_id
+    
+    # Se è un ID IMDB (tt...), chiediamo a TMDB
     try:
         res = await client.get(
             f"https://api.themoviedb.org/3/find/{imdb_id}",
             params={"external_source": "imdb_id", "api_key": TMDB_API_KEY},
             timeout=5
         )
-        data = res.json()
-        if data.get('movie_results'): return str(data['movie_results'][0]['id'])
-        if data.get('tv_results'): return str(data['tv_results'][0]['id'])
+        if res.status_code == 200:
+            data = res.json()
+            if data.get('movie_results'): return str(data['movie_results'][0]['id'])
+            if data.get('tv_results'): return str(data['tv_results'][0]['id'])
     except Exception as e:
         logger.error(f"TMDB Error: {e}")
     return None
@@ -95,12 +100,12 @@ class VixExtractor:
         streams = []
         try:
             parts = stream_id.split(':')
-            imdb_id = parts[0]
+            content_id = parts[0]
             season = parts[1] if len(parts) > 1 else None
             episode = parts[2] if len(parts) > 2 else None
 
             async with AsyncSession() as client:
-                tmdb_id = await get_tmdb_id(imdb_id, client)
+                tmdb_id = await get_tmdb_id(content_id, client)
                 if not tmdb_id: return {"streams": []}
 
                 path = f"/movie/{tmdb_id}/" if stream_type == "movie" else f"/tv/{tmdb_id}/{season}/{episode}/"
@@ -139,12 +144,55 @@ app.add_middleware(
 
 extractor = VixExtractor()
 
-@app.get("/")
-async def root():
-    return {"status": "online", "message": "Addon is running. Install via manifest.json"}
+# ---------------------------------------------------------
+# ROTTA PRINCIPALE (LANDING PAGE HTML)
+# ---------------------------------------------------------
+@app.get("/", response_class=HTMLResponse)
+async def root(request: Request):
+    base_url = str(request.base_url).rstrip("/")
+    manifest_url = f"{base_url}/manifest.json"
+    stremio_url = manifest_url.replace("https://", "stremio://").replace("http://", "stremio://")
 
+    html_content = f"""
+    <!DOCTYPE html>
+    <html lang="it">
+    <head>
+        <meta charset="UTF-8">
+        <title>{ADDON_NAME}</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <style>
+            body {{ font-family: 'Segoe UI', sans-serif; background-color: #0f0f0f; color: #fff; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }}
+            .card {{ background: #1a1a1a; padding: 2rem; border-radius: 12px; box-shadow: 0 8px 24px rgba(0,0,0,0.5); text-align: center; max-width: 400px; width: 90%; border: 1px solid #333; }}
+            img {{ width: 80px; margin-bottom: 1.5rem; }}
+            h1 {{ font-size: 1.5rem; margin: 0 0 0.5rem; color: #fff; }}
+            p {{ color: #888; margin-bottom: 2rem; font-size: 0.9rem; }}
+            .btn {{ display: block; width: 100%; padding: 0.8rem 0; background: #6c5ce7; color: white; text-decoration: none; border-radius: 8px; font-weight: 600; transition: background 0.2s; border: none; cursor: pointer; }}
+            .btn:hover {{ background: #5b4cc4; }}
+            .link-box {{ margin-top: 1.5rem; padding: 0.8rem; background: #000; border: 1px solid #333; border-radius: 6px; word-break: break-all; font-family: monospace; font-size: 0.8rem; color: #00b894; user-select: all; }}
+            .label {{ font-size: 0.75rem; color: #555; margin-top: 1.5rem; margin-bottom: 0.5rem; display: block; }}
+        </style>
+    </head>
+    <body>
+        <div class="card">
+            <img src="{ADDON_LOGO}" alt="UFO Logo">
+            <h1>{ADDON_NAME}</h1>
+            <p>Addon per Stremio configurato correttamente.</p>
+            
+            <a class="btn" href="{stremio_url}">🚀 Installa su Stremio</a>
+            
+            <span class="label">Oppure copia questo link manualmente:</span>
+            <div class="link-box">{manifest_url}</div>
+        </div>
+    </body>
+    </html>
+    """
+    return HTMLResponse(content=html_content)
+
+# ---------------------------------------------------------
+# MANIFEST
+# ---------------------------------------------------------
 @app.get("/manifest.json")
-async def get_manifest(request: Request):
+async def get_manifest():
     return JSONResponse(content={
         "id": "org.stremio.ufo.addon",
         "version": ADDON_VERSION,
@@ -157,6 +205,9 @@ async def get_manifest(request: Request):
         "idPrefixes": ["tt", "tmdb"]
     }, headers={"Access-Control-Allow-Origin": "*"})
 
+# ---------------------------------------------------------
+# STREAMS
+# ---------------------------------------------------------
 @app.get("/stream/{type}/{id}.json")
 @limiter.limit("5/second")
 async def get_streams(request: Request, type: str, id: str):
