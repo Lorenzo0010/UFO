@@ -68,7 +68,7 @@ async def get_media_title(client: AsyncSession, tmdb_id: int, is_series: bool, s
         params = {"api_key": TMDB_API_KEY, "language": language}
         
         if not is_series:
-            # È un film
+            # --- FILM (Invariato) ---
             url = f"https://api.themoviedb.org/3/movie/{tmdb_id}"
             response = await client.get(url, params=params, timeout=5)
             if response.status_code == 200:
@@ -76,30 +76,21 @@ async def get_media_title(client: AsyncSession, tmdb_id: int, is_series: bool, s
                 return data.get("title", f"Film {tmdb_id}")
             return f"Film {tmdb_id}"
         else:
-            # È una serie
-            # 1. Recupera nome serie
-            show_url = f"https://api.themoviedb.org/3/tv/{tmdb_id}"
-            show_resp = await client.get(show_url, params=params, timeout=5)
-            show_name = show_resp.json().get("name", "Serie") if show_resp.status_code == 200 else "Serie"
-
-            # 2. Recupera nome episodio
+            # --- SERIE TV (Modificato: Solo titolo episodio) ---
+            # Nota: Non serve più chiamare l'API della serie principale, risparmiamo tempo.
             ep_url = f"https://api.themoviedb.org/3/tv/{tmdb_id}/season/{season}/episode/{episode}"
             ep_resp = await client.get(ep_url, params=params, timeout=5)
             
-            ep_name = ""
             if ep_resp.status_code == 200:
                 ep_data = ep_resp.json()
-                ep_name = f" - {ep_data.get('name', '')}"
+                # Ritorna SOLO il nome dell'episodio (es. "Questione di chimica")
+                return ep_data.get('name', f"Episodio {episode}")
             
-            s_str = str(season).zfill(2)
-            e_str = str(episode).zfill(2)
-            
-            # Output es: "Breaking Bad - S01E05 - Materia Grigia"
-            return f"{show_name} - S{s_str}E{e_str}{ep_name}"
+            return f"Episodio {episode}"
             
     except Exception as e:
         logger.error(f"❌ Errore recupero titolo TMDB: {e}")
-        if is_series: return f"Serie - S{season}E{episode}"
+        if is_series: return f"Episodio {episode}"
         return "Film"
 
 # ============================================================================
@@ -187,7 +178,7 @@ class StreamingCommunityExtractor:
                 try: tmdb_id = int(content_id)
                 except ValueError: return streams
 
-            # 1. Recupero Titolo/Info da TMDB
+            # 1. Recupero Titolo (Solo nome episodio per serie)
             media_title = await get_media_title(client, tmdb_id, is_series, season, episode)
 
             # 2. Costruzione URL Scraper
@@ -199,8 +190,8 @@ class StreamingCommunityExtractor:
             if result:
                 stream_url, quality = result
                 streams['streams'].append({
-                    "name": quality,         # Mostra 1080p / 720p
-                    "title": media_title,    # Mostra Titolo Film / Serie SxxExx
+                    "name": f"🛸 {quality}", 
+                    "title": media_title,
                     "url": stream_url,
                     "behaviorHints": {
                         "proxyHeaders": {"request": {"user-agent": User_Agent}},
