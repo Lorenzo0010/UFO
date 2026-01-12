@@ -28,7 +28,7 @@ ADDON_LOGO = "https://static.vecteezy.com/system/resources/thumbnails/050/270/61
 CONFIG = {
     "Siti": {
         "StreamingCommunity": {
-            "url": "https://vixsrc.to", # Assicurati che questo dominio sia aggiornato/raggiungibile
+            "url": "https://vixsrc.to", 
             "enabled": "1"
         }
     }
@@ -94,7 +94,7 @@ async def get_media_title(client: AsyncSession, tmdb_id: int, is_series: bool, s
         return "Film"
 
 # ============================================================================
-# EXTRACTOR (CORRETTO PER AUDIO)
+# EXTRACTOR
 # ============================================================================
 class StreamingCommunityExtractor:
     def __init__(self):
@@ -155,12 +155,11 @@ class StreamingCommunityExtractor:
                  else:
                      final_url += ".m3u8"
 
-            # --- NUOVA LOGICA: Analisi Metadata, ma URL Master ---
+            # --- Analisi Metadata (Solo per etichetta) ---
             detected_quality = "Auto"
             max_height = 0
 
             try:
-                # Scarichiamo la playlist solo per leggere le risoluzioni disponibili
                 m3u8_res = await client.get(final_url, headers=headers, timeout=6)
                 if m3u8_res.status_code == 200:
                     lines = m3u8_res.text.splitlines()
@@ -178,16 +177,13 @@ class StreamingCommunityExtractor:
             except Exception as e:
                 logger.warning(f"⚠️ Impossibile analizzare metadata m3u8: {e}")
 
-            # Fallback per l'etichetta se il parsing fallisce ma sappiamo che è FHD
             if max_height == 0 and "window.canPlayFHD = true" in video_data:
                 detected_quality = "1080p"
             elif max_height == 0:
-                detected_quality = "720p" # Default conservativo
+                detected_quality = "720p"
 
-            logger.info(f"✅ URL Master generato con successo. Qualità rilevata: {detected_quality}")
+            logger.info(f"✅ URL Master generato. Qualità rilevata: {detected_quality}")
             
-            # Restituiamo un unico risultato contenente il Master URL
-            # Il player gestirà automaticamente audio e video demuxati
             return [{
                 "quality": detected_quality,
                 "url": final_url,
@@ -230,7 +226,7 @@ class StreamingCommunityExtractor:
             for res in results:
                 streams['streams'].append({
                     "name": f"🛸 {res['quality']}", 
-                    "title": f"{media_title}\nAudio + Video (HLS)",
+                    "title": media_title, # <--- MODIFICATO QUI: Solo il titolo
                     "url": res['url'],
                     "behaviorHints": {
                         "proxyHeaders": {"request": {"user-agent": User_Agent}},
@@ -283,9 +279,9 @@ async def root(request: Request):
 async def manifest():
     config = {
         "id": "org.stremio.mammamia.ufo",
-        "version": "1.3.3",
+        "version": "1.3.4",
         "name": ADDON_NAME,
-        "description": "VixSrc Stream via Vercel - Max Quality (Audio Fix)",
+        "description": "VixSrc Stream via Vercel",
         "logo": ADDON_LOGO,
         "resources": ["stream"],
         "types": ["movie", "series"],
