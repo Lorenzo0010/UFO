@@ -2,7 +2,7 @@ import json
 import logging
 import re
 import os
-from typing import Dict, Optional, Any
+from typing import Dict, Optional, Any, Tuple
 from curl_cffi.requests import AsyncSession
 from bs4 import BeautifulSoup
 from fake_headers import Headers
@@ -18,12 +18,11 @@ from slowapi.middleware import SlowAPIMiddleware
 load_dotenv()
 
 # ============================================================================
-# CONFIGURAZIONE ADATTATA PER VERCEL
+# CONFIGURAZIONE
 # ============================================================================
 ADDON_NAME = "UFO addon"
 ADDON_LOGO = "https://static.vecteezy.com/system/resources/thumbnails/050/270/611/small/ufo-logo-design-no-background-perfect-for-print-on-demand-t-shirt-design-png.png"
 
-# Configurazioni statiche (senza file json)
 CONFIG = {
     "Siti": {
         "StreamingCommunity": {
@@ -37,7 +36,9 @@ CONFIG = {
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-# UTILITIES
+# ============================================================================
+# UTILITIES & TMDB HELPERS
+# ============================================================================
 User_Agent = "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:127.0) Gecko/20100101 Firefox/127.0"
 TMDB_API_KEY = os.getenv('TMDB_KEY', '536b1c46da222eb34b69d168f092b495')
 
@@ -60,6 +61,47 @@ async def get_tmdb_id_from_imdb(imdb_id: str, client: AsyncSession) -> Optional[
         logger.error(f"❌ Error converting IMDb ID: {e}")
         return None
 
+async def get_media_title(client: AsyncSession, tmdb_id: int, is_series: bool, season: str = None, episode: str = None) -> str:
+    """Recupera il titolo formattato da TMDB."""
+    try:
+        language = "it-IT"
+        params = {"api_key": TMDB_API_KEY, "language": language}
+        
+        if not is_series:
+            # È un film
+            url = f"https://api.themoviedb.org/3/movie/{tmdb_id}"
+            response = await client.get(url, params=params, timeout=5)
+            if response.status_code == 200:
+                data = response.json()
+                return data.get("title", f"Film {tmdb_id}")
+            return f"Film {tmdb_id}"
+        else:
+            # È una serie
+            # 1. Recupera nome serie
+            show_url = f"https://api.themoviedb.org/3/tv/{tmdb_id}"
+            show_resp = await client.get(show_url, params=params, timeout=5)
+            show_name = show_resp.json().get("name", "Serie") if show_resp.status_code == 200 else "Serie"
+
+            # 2. Recupera nome episodio
+            ep_url = f"https://api.themoviedb.org/3/tv/{tmdb_id}/season/{season}/episode/{episode}"
+            ep_resp = await client.get(ep_url, params=params, timeout=5)
+            
+            ep_name = ""
+            if ep_resp.status_code == 200:
+                ep_data = ep_resp.json()
+                ep_name = f" - {ep_data.get('name', '')}"
+            
+            s_str = str(season).zfill(2)
+            e_str = str(episode).zfill(2)
+            
+            # Output es: "Breaking Bad - S01E05 - Materia Grigia"
+            return f"{show_name} - S{s_str}E{e_str}{ep_name}"
+            
+    except Exception as e:
+        logger.error(f"❌ Errore recupero titolo TMDB: {e}")
+        if is_series: return f"Serie - S{season}E{episode}"
+        return "Film"
+
 # ============================================================================
 # EXTRACTOR
 # ============================================================================
@@ -68,7 +110,8 @@ class StreamingCommunityExtractor:
         self.domain = CONFIG['Siti']['StreamingCommunity']['url']
         self.random_headers = Headers()
 
-    async def extract_vixcloud_url(self, link: str, client: AsyncSession) -> Optional[str]:
+    async def extract_vixcloud_url(self, link: str, client: AsyncSession) -> Optional[Tuple[str, str]]:
+        """Estrae URL stream e determina la qualità."""
         try:
             logger.info(f"🔍 Fetching: {link}")
             headers = self.random_headers.generate()
@@ -98,16 +141,24 @@ class StreamingCommunityExtractor:
                         separator = "&" if "?" in server_url else "?"
                         final_url = f"{server_url}{separator}token={token}&expires={expires}"
                         
+                        # --- LOGICA QUALITÀ ---
+                        quality = "720p" # Default standard
                         if "?b=1" in server_url and "b=1" not in final_url: final_url += "&b=1"
-                        if "window.canPlayFHD = true" in video_data: final_url += "&h=1"
                         
+                        # Se il flag canPlayFHD è true, impostiamo 1080p
+                        if "window.canPlayFHD = true" in video_data: 
+                            final_url += "&h=1"
+                            quality = "1080p"
+                        
+                        # Fix estensione m3u8
                         if ".m3u8" not in final_url:
                              if "?" in final_url:
                                  base, params = final_url.split("?", 1)
                                  if not base.endswith(".m3u8"): final_url = f"{base}.m3u8?{params}"
                              else:
                                  final_url += ".m3u8"
-                        return final_url
+                        
+                        return final_url, quality
             return None
         except Exception as e:
             logger.error(f"❌ Extractor Error: {e}")
@@ -136,13 +187,20 @@ class StreamingCommunityExtractor:
                 try: tmdb_id = int(content_id)
                 except ValueError: return streams
 
+            # 1. Recupero Titolo/Info da TMDB
+            media_title = await get_media_title(client, tmdb_id, is_series, season, episode)
+
+            # 2. Costruzione URL Scraper
             url = f'{self.domain}/tv/{tmdb_id}/{season}/{episode}/' if is_series else f'{self.domain}/movie/{tmdb_id}/'
-            stream_url = await self.extract_vixcloud_url(url, client)
             
-            if stream_url:
+            # 3. Estrazione Stream
+            result = await self.extract_vixcloud_url(url, client)
+            
+            if result:
+                stream_url, quality = result
                 streams['streams'].append({
-                    "name": "🛸UFO",
-                    "title": f"{self.domain}",
+                    "name": quality,         # Mostra 1080p / 720p
+                    "title": media_title,    # Mostra Titolo Film / Serie SxxExx
                     "url": stream_url,
                     "behaviorHints": {
                         "proxyHeaders": {"request": {"user-agent": User_Agent}},
@@ -183,7 +241,6 @@ def respond_with(data: Any) -> JSONResponse:
 # ============================================================================
 @app.get("/")
 async def root(request: Request):
-    # Rilevamento automatico dell'URL
     base_url = str(request.base_url).rstrip("/")
     return respond_with({
         "status": "online",
