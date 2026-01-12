@@ -28,7 +28,7 @@ ADDON_LOGO = "https://static.vecteezy.com/system/resources/thumbnails/050/270/61
 CONFIG = {
     "Siti": {
         "StreamingCommunity": {
-            "url": "https://vixsrc.to",
+            "url": "https://vixsrc.to", # Assicurati che questo dominio sia aggiornato/raggiungibile
             "enabled": "1"
         }
     }
@@ -94,7 +94,7 @@ async def get_media_title(client: AsyncSession, tmdb_id: int, is_series: bool, s
         return "Film"
 
 # ============================================================================
-# EXTRACTOR
+# EXTRACTOR (CORRETTO PER AUDIO)
 # ============================================================================
 class StreamingCommunityExtractor:
     def __init__(self):
@@ -102,7 +102,11 @@ class StreamingCommunityExtractor:
         self.random_headers = Headers()
 
     async def extract_vixcloud_url(self, link: str, client: AsyncSession) -> List[Dict]:
-        """Estrae URL e restituisce SOLO la risoluzione migliore trovata nel master playlist."""
+        """
+        Estrae l'URL della Master Playlist.
+        Analizza il file .m3u8 SOLO per determinare l'etichetta della qualità (es. 1080p),
+        ma restituisce l'URL originale per garantire che l'audio funzioni.
+        """
         try:
             logger.info(f"🔍 Fetching: {link}")
             headers = self.random_headers.generate()
@@ -151,43 +155,44 @@ class StreamingCommunityExtractor:
                  else:
                      final_url += ".m3u8"
 
-            # --- LOGICA RISOLUZIONE MASSIMA ---
-            found_streams = []
+            # --- NUOVA LOGICA: Analisi Metadata, ma URL Master ---
+            detected_quality = "Auto"
+            max_height = 0
+
             try:
-                # Scarica la master playlist
+                # Scarichiamo la playlist solo per leggere le risoluzioni disponibili
                 m3u8_res = await client.get(final_url, headers=headers, timeout=6)
                 if m3u8_res.status_code == 200:
                     lines = m3u8_res.text.splitlines()
-                    for i, line in enumerate(lines):
-                        if "#EXT-X-STREAM-INF" in line and "RESOLUTION=" in line:
+                    for line in lines:
+                        if "RESOLUTION=" in line:
                             res_match = re.search(r'RESOLUTION=(\d+)x(\d+)', line)
                             if res_match:
                                 height = int(res_match.group(2))
-                                quality = f"{height}p"
-                                
-                                if i + 1 < len(lines):
-                                    stream_url = lines[i+1].strip()
-                                    if not stream_url.startswith("http"):
-                                        stream_url = urljoin(final_url, stream_url)
-                                    
-                                    found_streams.append({
-                                        "quality": quality,
-                                        "url": stream_url,
-                                        "height": height
-                                    })
+                                if height > max_height:
+                                    max_height = height
+                    
+                    if max_height > 0:
+                        detected_quality = f"{max_height}p"
+                        
             except Exception as e:
-                logger.warning(f"⚠️ Impossibile analizzare m3u8, fallback attivo: {e}")
+                logger.warning(f"⚠️ Impossibile analizzare metadata m3u8: {e}")
 
-            if found_streams:
-                # 1. Ordina dal più alto al più basso
-                found_streams.sort(key=lambda x: x['height'], reverse=True)
-                # 2. Prende SOLO il primo elemento (la qualità massima)
-                logger.info(f"✅ Selezionata qualità migliore: {found_streams[0]['quality']}")
-                return [found_streams[0]]
+            # Fallback per l'etichetta se il parsing fallisce ma sappiamo che è FHD
+            if max_height == 0 and "window.canPlayFHD = true" in video_data:
+                detected_quality = "1080p"
+            elif max_height == 0:
+                detected_quality = "720p" # Default conservativo
 
-            # FALLBACK
-            fallback_quality = "1080p" if "window.canPlayFHD = true" in video_data else "720p"
-            return [{"quality": fallback_quality, "url": final_url}]
+            logger.info(f"✅ URL Master generato con successo. Qualità rilevata: {detected_quality}")
+            
+            # Restituiamo un unico risultato contenente il Master URL
+            # Il player gestirà automaticamente audio e video demuxati
+            return [{
+                "quality": detected_quality,
+                "url": final_url,
+                "height": max_height
+            }]
 
         except Exception as e:
             logger.error(f"❌ Extractor Error: {e}")
@@ -220,13 +225,12 @@ class StreamingCommunityExtractor:
 
             url = f'{self.domain}/tv/{tmdb_id}/{season}/{episode}/' if is_series else f'{self.domain}/movie/{tmdb_id}/'
             
-            # Recupera solo la qualità massima
             results = await self.extract_vixcloud_url(url, client)
             
             for res in results:
                 streams['streams'].append({
                     "name": f"🛸 {res['quality']}", 
-                    "title": f"{media_title}",
+                    "title": f"{media_title}\nAudio + Video (HLS)",
                     "url": res['url'],
                     "behaviorHints": {
                         "proxyHeaders": {"request": {"user-agent": User_Agent}},
@@ -279,9 +283,9 @@ async def root(request: Request):
 async def manifest():
     config = {
         "id": "org.stremio.mammamia.ufo",
-        "version": "1.3.2",
+        "version": "1.3.3",
         "name": ADDON_NAME,
-        "description": "VixSrc Stream via Vercel - Max Quality Only",
+        "description": "VixSrc Stream via Vercel - Max Quality (Audio Fix)",
         "logo": ADDON_LOGO,
         "resources": ["stream"],
         "types": ["movie", "series"],
