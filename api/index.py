@@ -3,7 +3,7 @@ import logging
 import re
 import os
 from typing import Dict, Optional, Any, Tuple, List
-from urllib.parse import urljoin  # <--- IMPORT NECESSARIO AGGIUNTO
+from urllib.parse import urljoin
 
 from curl_cffi.requests import AsyncSession
 from bs4 import BeautifulSoup
@@ -102,7 +102,7 @@ class StreamingCommunityExtractor:
         self.random_headers = Headers()
 
     async def extract_vixcloud_url(self, link: str, client: AsyncSession) -> List[Dict]:
-        """Estrae URL e analizza il master playlist per le risoluzioni reali."""
+        """Estrae URL e restituisce SOLO la risoluzione migliore trovata nel master playlist."""
         try:
             logger.info(f"🔍 Fetching: {link}")
             headers = self.random_headers.generate()
@@ -141,7 +141,6 @@ class StreamingCommunityExtractor:
             
             # Parametri opzionali
             if "?b=1" in server_url and "b=1" not in final_url: final_url += "&b=1"
-            # Manteniamo la richiesta h=1 per avere la massima qualità disponibile nel master list
             if "window.canPlayFHD = true" in video_data: final_url += "&h=1"
             
             # Fix estensione
@@ -152,25 +151,22 @@ class StreamingCommunityExtractor:
                  else:
                      final_url += ".m3u8"
 
-            # --- NUOVA LOGICA: CONTROLLO REALE M3U8 ---
+            # --- LOGICA RISOLUZIONE MASSIMA ---
             found_streams = []
             try:
-                # Scarichiamo la playlist per vedere cosa c'è dentro davvero
+                # Scarica la master playlist
                 m3u8_res = await client.get(final_url, headers=headers, timeout=6)
                 if m3u8_res.status_code == 200:
                     lines = m3u8_res.text.splitlines()
                     for i, line in enumerate(lines):
-                        # Cerchiamo le righe con le info sullo stream
                         if "#EXT-X-STREAM-INF" in line and "RESOLUTION=" in line:
                             res_match = re.search(r'RESOLUTION=(\d+)x(\d+)', line)
                             if res_match:
                                 height = int(res_match.group(2))
-                                quality = f"{height}p" # Es: 1080p, 720p
+                                quality = f"{height}p"
                                 
-                                # L'URL effettivo è nella riga successiva
                                 if i + 1 < len(lines):
                                     stream_url = lines[i+1].strip()
-                                    # Se l'URL è relativo (non inizia con http), uniscilo al dominio base
                                     if not stream_url.startswith("http"):
                                         stream_url = urljoin(final_url, stream_url)
                                     
@@ -182,14 +178,14 @@ class StreamingCommunityExtractor:
             except Exception as e:
                 logger.warning(f"⚠️ Impossibile analizzare m3u8, fallback attivo: {e}")
 
-            # Se abbiamo trovato stream reali, li restituiamo (ordinati per qualità)
             if found_streams:
-                # Ordina dal più alto al più basso
+                # 1. Ordina dal più alto al più basso
                 found_streams.sort(key=lambda x: x['height'], reverse=True)
-                return found_streams
+                # 2. Prende SOLO il primo elemento (la qualità massima)
+                logger.info(f"✅ Selezionata qualità migliore: {found_streams[0]['quality']}")
+                return [found_streams[0]]
 
-            # FALLBACK: Se il file non è una master playlist o il parsing fallisce, 
-            # usiamo l'URL originale con la logica vecchia (ma come backup).
+            # FALLBACK
             fallback_quality = "1080p" if "window.canPlayFHD = true" in video_data else "720p"
             return [{"quality": fallback_quality, "url": final_url}]
 
@@ -220,16 +216,13 @@ class StreamingCommunityExtractor:
                 try: tmdb_id = int(content_id)
                 except ValueError: return streams
 
-            # 1. Recupero Titolo
             media_title = await get_media_title(client, tmdb_id, is_series, season, episode)
 
-            # 2. Costruzione URL Scraper
             url = f'{self.domain}/tv/{tmdb_id}/{season}/{episode}/' if is_series else f'{self.domain}/movie/{tmdb_id}/'
             
-            # 3. Estrazione Stream Reali
+            # Recupera solo la qualità massima
             results = await self.extract_vixcloud_url(url, client)
             
-            # 4. Creazione lista per Stremio
             for res in results:
                 streams['streams'].append({
                     "name": f"🛸 {res['quality']}", 
@@ -286,9 +279,9 @@ async def root(request: Request):
 async def manifest():
     config = {
         "id": "org.stremio.mammamia.ufo",
-        "version": "1.3.1",
+        "version": "1.3.2",
         "name": ADDON_NAME,
-        "description": "VixSrc Stream via Vercel",
+        "description": "VixSrc Stream via Vercel - Max Quality Only",
         "logo": ADDON_LOGO,
         "resources": ["stream"],
         "types": ["movie", "series"],
