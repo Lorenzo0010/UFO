@@ -2,8 +2,8 @@ import json
 import logging
 import re
 import os
-from typing import Dict, Optional, Any, List
-from datetime import datetime
+from typing import Dict, Optional, Any, Tuple, List
+from urllib.parse import urljoin
 
 from curl_cffi.requests import AsyncSession
 from bs4 import BeautifulSoup
@@ -20,206 +20,113 @@ from slowapi.middleware import SlowAPIMiddleware
 load_dotenv()
 
 # ============================================================================
-# LOGGING CONFIGURAZIONE
+# CONFIGURAZIONE
 # ============================================================================
-class ColoredFormatter(logging.Formatter):
-    COLORS = {
-        'DEBUG': '\033[36m',      # Cyan
-        'INFO': '\033[32m',       # Green
-        'WARNING': '\033[33m',    # Yellow
-        'ERROR': '\033[31m',      # Red
-        'CRITICAL': '\033[41m',   # Red bg
-    }
-    RESET = '\033[0m'
-    
-    def format(self, record):
-        log_color = self.COLORS.get(record.levelname, self.RESET)
-        record.msg = f"{log_color}{record.msg}{self.RESET}"
-        return super().format(record)
+ADDON_NAME = "UFO addon"
+ADDON_LOGO = "https://static.vecteezy.com/system/resources/thumbnails/050/270/611/small/ufo-logo-design-no-background-perfect-for-print-on-demand-t-shirt-design-png.png"
 
-log_handler = logging.StreamHandler()
-log_formatter = ColoredFormatter(
-    '%(asctime)s - [%(levelname)s] - %(name)s - %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
-)
-log_handler.setFormatter(log_formatter)
-logging.basicConfig(level=logging.DEBUG, handlers=[log_handler])
+CONFIG = {
+    "Siti": {
+        "StreamingCommunity": {
+            "url": "https://vixsrc.to", 
+            "enabled": "1"
+        }
+    }
+}
+
+# LOGGING
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
 # ============================================================================
-# CONFIGURAZIONE DA CONFIG.JSON
+# UTILITIES & TMDB HELPERS
 # ============================================================================
-try:
-    with open('config.json') as f:
-        CONFIG_DATA = json.load(f)
-    logger.info("✅ config.json caricato")
-except FileNotFoundError:
-    logger.warning("⚠️ config.json non trovato, usando default")
-    CONFIG_DATA = {
-        "Siti": {
-            "StreamingCommunity": {
-                "url": "https://vixsrc.to",
-                "SC_ForwardProxy": "0",
-                "SC_PROXY": "0",
-                "VX_ForwardProxy": "0",
-                "VX_PROXY": "0",
-                "enabled": "1"
-            }
-        },
-        "General": {
-            "load_env": "1",
-            "HOST": "0.0.0.0",
-            "PORT": 8080,
-            "Name": "UFO Addon",
-            "Icon": "🛸",
-            "level": "info",
-            "Global_Proxy": "0"
-        }
-    }
-
-# Estrai configurazioni
-SITE_CONFIG = CONFIG_DATA.get("Siti", {})
-GENERAL_CONFIG = CONFIG_DATA.get("General", {})
-
-SC_DOMAIN = SITE_CONFIG.get("StreamingCommunity", {}).get("url", "https://vixsrc.to")
-SC_ENABLED = SITE_CONFIG.get("StreamingCommunity", {}).get("enabled", "1")
-SC_PROXY = SITE_CONFIG.get("StreamingCommunity", {}).get("SC_PROXY", "0")
-SC_FORWARDPROXY = SITE_CONFIG.get("StreamingCommunity", {}).get("SC_ForwardProxy", "0")
-VX_PROXY = SITE_CONFIG.get("StreamingCommunity", {}).get("VX_PROXY", "0")
-VX_FORWARDPROXY = SITE_CONFIG.get("StreamingCommunity", {}).get("VX_ForwardProxy", "0")
-
-HOST = GENERAL_CONFIG.get("HOST", "0.0.0.0")
-PORT = int(GENERAL_CONFIG.get("PORT", 8080))
-ADDON_NAME = GENERAL_CONFIG.get("Name", "UFO Addon")
-ADDON_ICON = GENERAL_CONFIG.get("Icon", "🛸")
-LOG_LEVEL = GENERAL_CONFIG.get("level", "info")
-GLOBAL_PROXY = GENERAL_CONFIG.get("Global_Proxy", "0")
-
-# Carica variabili d'ambiente
+User_Agent = "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:127.0) Gecko/20100101 Firefox/127.0"
 TMDB_API_KEY = os.getenv('TMDB_KEY', '536b1c46da222eb34b69d168f092b495')
-PROXY_CREDENTIALS = os.getenv('PROXY', '')
-FORWARD_PROXY = os.getenv('FORWARDPROXY', '')
-PORT_ENV = os.getenv('PORT', None)
 
-if PORT_ENV:
-    PORT = int(PORT_ENV)
+def clean_id(id_str: str) -> str:
+    return id_str.split(':')[0] if ':' in id_str else id_str
 
-ADDON_LOGO = "https://static.vecteezy.com/system/resources/thumbnails/050/270/611/small/ufo-logo-design-no-background-perfect-for-print-on-demand-t-shirt-design-png.png"
-User_Agent = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36"
-
-logger.info(f"🚀 {ADDON_NAME} INIZIALIZZATO")
-logger.info(f"📍 SC Domain: {SC_DOMAIN}")
-logger.info(f"🔧 SC Enabled: {SC_ENABLED} | SC_PROXY: {SC_PROXY} | VX_PROXY: {VX_PROXY}")
-logger.info(f"🌐 Host: {HOST}:{PORT}")
-
-# ============================================================================
-# PROXY CONFIGURATION
-# ============================================================================
-def get_proxies():
-    """Ritorna proxy configurati se abilitati."""
-    proxies = {}
-    if GLOBAL_PROXY == "1" and PROXY_CREDENTIALS:
-        proxies = {"http": PROXY_CREDENTIALS, "https": PROXY_CREDENTIALS}
-        logger.debug(f"🔀 Global Proxy abilitato")
-    elif SC_PROXY == "1" and PROXY_CREDENTIALS:
-        try:
-            proxy_list = json.loads(PROXY_CREDENTIALS)
-            if isinstance(proxy_list, list) and proxy_list:
-                import random
-                proxy = random.choice(proxy_list)
-                proxies = {"http": proxy, "https": proxy}
-                logger.debug(f"🔀 SC Proxy abilitato (random)")
-        except:
-            pass
-    return proxies
-
-# ============================================================================
-# TMDB HELPERS
-# ============================================================================
 async def get_tmdb_id_from_imdb(imdb_id: str, client: AsyncSession) -> Optional[int]:
-    """Converte IMDb ID a TMDB ID."""
-    logger.info(f"🔄 TMDB Lookup: {imdb_id}")
     try:
-        url = f"https://api.themoviedb.org/3/find/{imdb_id}"
-        params = {"external_source": "imdb_id", "api_key": TMDB_API_KEY, "language": "it"}
-        
-        response = await client.get(url, params=params, timeout=10)
-        
+        response = await client.get(
+            f"https://api.themoviedb.org/3/find/{imdb_id}",
+            params={"external_source": "imdb_id", "api_key": TMDB_API_KEY, "language": "it"},
+            timeout=10
+        )
         if response.status_code == 200:
             data = response.json()
-            if data.get('movie_results'):
-                tmdb_id = data['movie_results'][0].get('id')
-                logger.info(f"✅ {imdb_id} → TMDB {tmdb_id} (Movie)")
-                return tmdb_id
-            elif data.get('tv_results'):
-                tmdb_id = data['tv_results'][0].get('id')
-                logger.info(f"✅ {imdb_id} → TMDB {tmdb_id} (TV)")
-                return tmdb_id
-        logger.warning(f"⚠️ TMDB lookup failed: {imdb_id}")
+            if data.get('movie_results'): return data['movie_results'][0].get('id')
+            if data.get('tv_results'): return data['tv_results'][0].get('id')
         return None
     except Exception as e:
-        logger.error(f"❌ TMDB Exception: {e}")
+        logger.error(f"❌ Error converting IMDb ID: {e}")
         return None
 
 async def get_media_title(client: AsyncSession, tmdb_id: int, is_series: bool, season: str = None, episode: str = None) -> str:
-    """Recupera titolo da TMDB."""
+    """Recupera il titolo formattato da TMDB."""
     try:
-        params = {"api_key": TMDB_API_KEY, "language": "it-IT"}
+        language = "it-IT"
+        params = {"api_key": TMDB_API_KEY, "language": language}
         
         if not is_series:
+            # --- FILM ---
             url = f"https://api.themoviedb.org/3/movie/{tmdb_id}"
             response = await client.get(url, params=params, timeout=5)
             if response.status_code == 200:
-                return response.json().get("title", f"Film {tmdb_id}")
+                data = response.json()
+                return data.get("title", f"Film {tmdb_id}")
             return f"Film {tmdb_id}"
         else:
-            url = f"https://api.themoviedb.org/3/tv/{tmdb_id}/season/{season}/episode/{episode}"
-            response = await client.get(url, params=params, timeout=5)
-            if response.status_code == 200:
-                return response.json().get('name', f"Episodio {episode}")
+            # --- SERIE TV ---
+            ep_url = f"https://api.themoviedb.org/3/tv/{tmdb_id}/season/{season}/episode/{episode}"
+            ep_resp = await client.get(ep_url, params=params, timeout=5)
+            
+            if ep_resp.status_code == 200:
+                ep_data = ep_resp.json()
+                return ep_data.get('name', f"Episodio {episode}")
+            
             return f"Episodio {episode}"
+            
     except Exception as e:
-        logger.warning(f"⚠️ Title fetch failed: {e}")
-        return "Titolo non disponibile"
+        logger.error(f"❌ Errore recupero titolo TMDB: {e}")
+        if is_series: return f"Episodio {episode}"
+        return "Film"
 
 # ============================================================================
-# VIXCLOUD EXTRACTOR
+# EXTRACTOR
 # ============================================================================
-class VixCloudExtractor:
+class StreamingCommunityExtractor:
     def __init__(self):
-        self.domain = SC_DOMAIN
+        self.domain = CONFIG['Siti']['StreamingCommunity']['url']
         self.random_headers = Headers()
 
-    async def extract_vixcloud_url(self, link: str, client: AsyncSession, proxies: dict) -> List[Dict]:
-        """Estrae M3U8 URL da vixcloud."""
-        logger.info(f"🔍 Estrattore Vixcloud avviato")
-        logger.info(f"   Target: {link}")
-        
+    async def extract_vixcloud_url(self, link: str, client: AsyncSession) -> List[Dict]:
+        """
+        Estrae l'URL della Master Playlist.
+        Analizza il file .m3u8 SOLO per determinare l'etichetta della qualità (es. 1080p),
+        ma restituisce l'URL originale per garantire che l'audio funzioni.
+        """
         try:
+            logger.info(f"🔍 Fetching: {link}")
             headers = self.random_headers.generate()
             headers['Referer'] = f"{self.domain}/"
             headers['User-Agent'] = User_Agent
             
-            response = await client.get(link, headers=headers, timeout=15, proxies=proxies)
-            logger.info(f"✅ Response: {response.status_code}")
-            
+            response = await client.get(link, headers=headers, timeout=15)
             if response.status_code != 200:
-                logger.error(f"❌ Status code: {response.status_code}")
                 return []
 
             soup = BeautifulSoup(response.text, "lxml")
             scripts = soup.find_all("script")
-            logger.info(f"   Found {len(scripts)} script tags")
             
             video_data = None
-            for i, script in enumerate(scripts):
+            for script in scripts:
                 if script.string and "token" in script.string and "expires" in script.string:
                     video_data = script.string
-                    logger.info(f"✅ Video data trovato (Script[{i}])")
                     break
             
             if not video_data:
-                logger.error(f"❌ Video data script non trovato")
                 return []
 
             token_match = re.search(r"'token':\s*'(\w+)'", video_data)
@@ -227,40 +134,33 @@ class VixCloudExtractor:
             url_match = re.search(r"url:\s*'([^']+)'", video_data)
             
             if not all([token_match, expires_match, url_match]):
-                logger.error(f"❌ Parametri non trovati")
                 return []
 
             token = token_match.group(1)
             expires = expires_match.group(1)
             server_url = url_match.group(1)
             
-            logger.info(f"✅ Parametri estratti:")
-            logger.info(f"   Token: {token[:10]}...")
-            logger.info(f"   Expires: {expires}")
-            
             separator = "&" if "?" in server_url else "?"
             final_url = f"{server_url}{separator}token={token}&expires={expires}"
             
-            if "?b=1" in server_url and "b=1" not in final_url:
-                final_url += "&b=1"
-            if "window.canPlayFHD = true" in video_data:
-                final_url += "&h=1"
-
+            # Parametri opzionali
+            if "?b=1" in server_url and "b=1" not in final_url: final_url += "&b=1"
+            if "window.canPlayFHD = true" in video_data: final_url += "&h=1"
+            
+            # Fix estensione
             if ".m3u8" not in final_url:
-                if "?" in final_url:
-                    base, params = final_url.split("?", 1)
-                    if not base.endswith(".m3u8"):
-                        final_url = f"{base}.m3u8?{params}"
-                else:
-                    final_url += ".m3u8"
+                 if "?" in final_url:
+                     base, params = final_url.split("?", 1)
+                     if not base.endswith(".m3u8"): final_url = f"{base}.m3u8?{params}"
+                 else:
+                     final_url += ".m3u8"
 
-            logger.info(f"✅ Final URL generato")
-
-            # Analizza M3U8 per qualità
+            # --- Analisi Metadata (Solo per etichetta) ---
             detected_quality = "Auto"
             max_height = 0
+
             try:
-                m3u8_res = await client.get(final_url, headers=headers, timeout=6, proxies=proxies)
+                m3u8_res = await client.get(final_url, headers=headers, timeout=6)
                 if m3u8_res.status_code == 200:
                     lines = m3u8_res.text.splitlines()
                     for line in lines:
@@ -270,12 +170,20 @@ class VixCloudExtractor:
                                 height = int(res_match.group(2))
                                 if height > max_height:
                                     max_height = height
+                    
                     if max_height > 0:
                         detected_quality = f"{max_height}p"
-            except:
-                detected_quality = "1080p" if "window.canPlayFHD = true" in video_data else "720p"
+                        
+            except Exception as e:
+                logger.warning(f"⚠️ Impossibile analizzare metadata m3u8: {e}")
 
-            logger.info(f"✅ Quality: {detected_quality}")
+            if max_height == 0 and "window.canPlayFHD = true" in video_data:
+                detected_quality = "1080p"
+            elif max_height == 0:
+                detected_quality = "720p"
+
+            logger.info(f"✅ URL Master generato. Qualità rilevata: {detected_quality}")
+            
             return [{
                 "quality": detected_quality,
                 "url": final_url,
@@ -283,23 +191,16 @@ class VixCloudExtractor:
             }]
 
         except Exception as e:
-            logger.error(f"❌ EXTRACTOR ERROR: {e}")
+            logger.error(f"❌ Extractor Error: {e}")
             return []
 
     async def get_streams(self, id: str, client: AsyncSession) -> Dict:
-        """Estrae stream da StreamingCommunity."""
-        logger.info(f"=" * 80)
-        logger.info(f"📺 GET_STREAMS: {id}")
-        logger.info(f"=" * 80)
-        
         streams = {'streams': []}
-        
         try:
-            # Parse ID
             is_series = False
             season = None
             episode = None
-            content_id = id.split(':')[0] if ':' in id else id
+            content_id = clean_id(id)
             
             if ':' in id:
                 parts = id.split(':')
@@ -307,72 +208,41 @@ class VixCloudExtractor:
                 if len(parts) >= 3:
                     season, episode = parts[1], parts[2]
                     is_series = True
-                    logger.info(f"✅ SERIE - S{season}E{episode}")
-            else:
-                logger.info(f"✅ FILM")
 
-            # Determina TMDB ID
             tmdb_id = None
             if content_id.startswith('tt'):
-                logger.info(f"   IMDb format: {content_id}")
                 tmdb_id = await get_tmdb_id_from_imdb(content_id, client)
-                if not tmdb_id:
-                    logger.error(f"❌ IMDb → TMDB conversion fallito")
-                    return streams
+                if not tmdb_id: return streams
             else:
-                try:
-                    tmdb_id = int(content_id)
-                    logger.info(f"✅ TMDB ID: {tmdb_id}")
-                except ValueError:
-                    logger.error(f"❌ Invalid ID format: {content_id}")
-                    return streams
+                try: tmdb_id = int(content_id)
+                except ValueError: return streams
 
-            # Fetch title
             media_title = await get_media_title(client, tmdb_id, is_series, season, episode)
 
-            # Build URL
-            if is_series:
-                url = f'{SC_DOMAIN}/tv/{tmdb_id}/{season}/{episode}/'
-            else:
-                url = f'{SC_DOMAIN}/movie/{tmdb_id}/'
-            logger.info(f"   URL: {url}")
+            url = f'{self.domain}/tv/{tmdb_id}/{season}/{episode}/' if is_series else f'{self.domain}/movie/{tmdb_id}/'
             
-            # Get proxies
-            proxies = get_proxies()
-            
-            # Extract streams
-            extractor = VixCloudExtractor()
-            results = await extractor.extract_vixcloud_url(url, client, proxies)
+            results = await self.extract_vixcloud_url(url, client)
             
             for res in results:
-                stream_entry = {
-                    "name": f"{ADDON_ICON} {res['quality']}", 
-                    "title": media_title,
+                streams['streams'].append({
+                    "name": f"🛸 {res['quality']}", 
+                    "title": media_title, # <--- MODIFICATO QUI: Solo il titolo
                     "url": res['url'],
                     "behaviorHints": {
-                        "proxyHeaders": {
-                            "request": {
-                                "User-Agent": User_Agent,
-                                "Referer": f"{SC_DOMAIN}/"
-                            }
-                        },
-                        "notWebReady": False,
+                        "proxyHeaders": {"request": {"user-agent": User_Agent}},
+                        "notWebReady": True,
                         "bingeGroup": "streamingcommunity"
                     }
-                }
-                streams['streams'].append(stream_entry)
-
-            logger.info(f"✅ COMPLETED - {len(streams['streams'])} stream(s)")
+                })
 
         except Exception as e:
-            logger.error(f"❌ GET_STREAMS ERROR: {e}")
-        
+            logger.error(f"❌ Stream Error: {e}")
         return streams
 
 # ============================================================================
-# FASTAPI APP
+# FASTAPI SETUP
 # ============================================================================
-app = FastAPI(title=ADDON_NAME)
+app = FastAPI(title=f"{ADDON_NAME} Addon")
 
 app.add_middleware(
     CORSMiddleware,
@@ -385,8 +255,7 @@ app.add_middleware(
 limiter = Limiter(key_func=get_remote_address)
 app.state.limiter = limiter
 app.add_middleware(SlowAPIMiddleware)
-
-extractor = VixCloudExtractor()
+extractor = StreamingCommunityExtractor()
 
 def respond_with(data: Any) -> JSONResponse:
     resp = JSONResponse(content=data)
@@ -395,71 +264,46 @@ def respond_with(data: Any) -> JSONResponse:
     return resp
 
 # ============================================================================
-# MANIFEST & ROUTES
+# ROUTES
 # ============================================================================
-MANIFEST = {
-    "id": "org.stremio.ufo.addon",
-    "version": "2.0.0",
-    "name": ADDON_NAME,
-    "description": "UFO Addon - StreamingCommunity Vixcloud",
-    "logo": ADDON_LOGO,
-    "resources": ["stream"],
-    "types": ["movie", "series"],
-    "catalogs": [],
-    "behaviorHints": {"configurable": False}
-}
-
 @app.get("/")
-@app.head("/")
 async def root(request: Request):
-    logger.info(f"📡 ROOT")
     base_url = str(request.base_url).rstrip("/")
     return respond_with({
-        "status": "online ✅",
+        "status": "online",
         "addon": ADDON_NAME,
-        "manifest": f"{base_url}/manifest.json"
+        "manifest": f"{base_url}/U0MQ/manifest.json"
     })
 
-@app.get("/manifest.json")
-@app.head("/manifest.json")
-async def manifest(request: Request):
-    logger.info(f"📄 MANIFEST")
-    return respond_with(MANIFEST)
+@app.get("/U0MQ/manifest.json")
+async def manifest():
+    config = {
+        "id": "org.stremio.mammamia.ufo",
+        "version": "1.3.4",
+        "name": ADDON_NAME,
+        "description": "VixSrc Stream via Vercel",
+        "logo": ADDON_LOGO,
+        "resources": ["stream"],
+        "types": ["movie", "series"],
+        "catalogs": [],
+        "behaviorHints": {"configurable": False}
+    }
+    return respond_with(config)
 
-@app.get("/{config:path}/manifest.json")
-async def manifest_config(config: str):
-    return respond_with(MANIFEST)
-
-@app.get("/stream/{type}/{id}.json")
-@app.head("/stream/{type}/{id}.json")
+@app.get("/U0MQ/stream/{type}/{id}.json")
 @limiter.limit("10/second")
 async def streams(request: Request, type: str, id: str):
-    logger.info(f"🎬 STREAM: {type}/{id}")
     try:
-        if type not in ["movie", "series"]:
-            raise HTTPException(status_code=404)
+        if type not in ["movie", "series"]: raise HTTPException(status_code=404)
         async with AsyncSession() as client:
             streams_data = await extractor.get_streams(id, client)
+        if not streams_data: streams_data = {"streams": []}
         return respond_with(streams_data)
-    except Exception as e:
-        logger.error(f"❌ ERROR: {e}")
+    except Exception:
         return respond_with({"streams": []})
 
-@app.get("/{config:path}/stream/{type}/{id}.json")
-async def streams_config(config: str, type: str, id: str, request: Request):
-    logger.info(f"🎬 STREAM (config): {type}/{id}")
-    try:
-        if type not in ["movie", "series"]:
-            raise HTTPException(status_code=404)
-        async with AsyncSession() as client:
-            streams_data = await extractor.get_streams(id, client)
-        return respond_with(streams_data)
-    except Exception as e:
-        logger.error(f"❌ ERROR: {e}")
-        return respond_with({"streams": []})
-
-@app.get("/{config:path}/meta/{type}/{id}.json")
-async def meta(config: str, type: str, id: str):
+@app.get("/U0MQ/meta/{type}/{id}.json")
+async def meta(type: str, id: str):
     return respond_with({
         "meta": {
             "id": id,
@@ -469,30 +313,6 @@ async def meta(config: str, type: str, id: str):
         }
     })
 
-@app.get("/{config:path}/catalog/{type}/{id}.json")
-async def catalog(config: str, type: str, id: str):
+@app.get("/U0MQ/catalog/{type}/{id}.json")
+async def catalog(type: str, id: str):
     return respond_with({"metas": []})
-
-@app.get("/debug/status")
-async def debug_status(request: Request):
-    logger.info(f"🔧 DEBUG STATUS")
-    return respond_with({
-        "status": "online ✅",
-        "addon": ADDON_NAME,
-        "version": MANIFEST["version"],
-        "config": {
-            "domain": SC_DOMAIN,
-            "enabled": SC_ENABLED,
-            "SC_PROXY": SC_PROXY,
-            "VX_PROXY": VX_PROXY,
-            "FORWARD_PROXY": "✅" if FORWARD_PROXY else "❌",
-            "GLOBAL_PROXY": GLOBAL_PROXY
-        },
-        "timestamp": str(datetime.now())
-    })
-
-if __name__ == "__main__":
-    logger.info(f"🚀 Avvio {ADDON_NAME}...")
-    logger.info(f"📍 http://{HOST}:{PORT}")
-    import uvicorn
-    uvicorn.run(app, host=HOST, port=PORT, log_level=LOG_LEVEL)
