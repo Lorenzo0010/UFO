@@ -9,7 +9,7 @@ from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from slowapi import Limiter
 from slowapi.util import get_remote_address
@@ -40,7 +40,7 @@ USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTM
 TMDB_API_KEY = os.getenv('TMDB_KEY', '536b1c46da222eb34b69d168f092b495')
 
 # ============================================================================
-# HELPERS
+# HELPERS TMDB
 # ============================================================================
 async def get_tmdb_id_from_imdb(imdb_id: str, client: AsyncSession) -> Optional[int]:
     try:
@@ -73,7 +73,7 @@ async def get_media_title(client: AsyncSession, tmdb_id: int, is_series: bool, s
         return "Streaming"
 
 # ============================================================================
-# EXTRACTOR & PROXY
+# EXTRACTOR
 # ============================================================================
 class StreamingCommunityExtractor:
     def __init__(self):
@@ -124,16 +124,16 @@ class StreamingCommunityExtractor:
             results = await self.extract_vixcloud_url(target_url, client)
             
             for res in results:
-                # CREAZIONE URL PROXY PER WINDOWS
+                # URL Proxy per bypassare blocchi browser
                 proxied_url = f"{base_url}/proxy/stream?url={quote(res['url'])}"
                 
                 streams['streams'].append({
                     "name": f"🛸 UFO PROXY\n{res['quality']}",
-                    "title": f"{media_title}\n(Ottimizzato per Windows/TV)",
+                    "title": f"{media_title}\n(VixCloud via Proxy)",
                     "url": proxied_url,
                     "behaviorHints": {
                         "notWebReady": False,
-                        "bingeGroup": "ufo-addon"
+                        "bingeGroup": "ufo-addon-v3"
                     }
                 })
         except Exception as e:
@@ -141,7 +141,7 @@ class StreamingCommunityExtractor:
         return streams
 
 # ============================================================================
-# FASTAPI
+# FASTAPI SETUP
 # ============================================================================
 app = FastAPI()
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
@@ -154,19 +154,44 @@ extractor = StreamingCommunityExtractor()
 def respond_with(data: Any) -> JSONResponse:
     return JSONResponse(content=data, headers={"Access-Control-Allow-Origin": "*"})
 
-@app.get("/")
-@app.head("/")
-async def root():
-    return respond_with({"status": "online", "addon": ADDON_NAME})
+# Homepage con Link Manifest visibile
+@app.get("/", response_class=HTMLResponse)
+async def root(request: Request):
+    base_url = str(request.base_url).rstrip("/")
+    manifest_url = f"{base_url}/U0MQ/manifest.json"
+    return f"""
+    <html>
+        <head>
+            <title>{ADDON_NAME}</title>
+            <style>
+                body {{ font-family: sans-serif; background: #121212; color: white; text-align: center; padding: 50px; }}
+                .container {{ background: #1e1e1e; padding: 30px; border-radius: 15px; display: inline-block; box-shadow: 0 4px 15px rgba(0,0,0,0.5); }}
+                code {{ background: #000; padding: 10px; display: block; margin: 20px 0; color: #00ff00; border-radius: 5px; word-break: break-all; }}
+                img {{ border-radius: 50%; width: 100px; }}
+                a {{ color: #00d2ff; text-decoration: none; font-weight: bold; }}
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <img src="{ADDON_LOGO}" alt="Logo">
+                <h1>{ADDON_NAME}</h1>
+                <p>Addon attivo con supporto <b>Reverse Proxy</b> per Windows.</p>
+                <p>Copia questo link e incollalo nella barra di ricerca di Stremio:</p>
+                <code>{manifest_url}</code>
+                <p><a href="stremio://{manifest_url.replace('https://', '').replace('http://', '')}">Installa direttamente in Stremio</a></p>
+            </div>
+        </body>
+    </html>
+    """
 
 @app.get("/U0MQ/manifest.json")
 @app.head("/U0MQ/manifest.json")
 async def manifest():
     return respond_with({
-        "id": "org.stremio.ufo.proxy",
-        "version": "1.4.0",
+        "id": "org.stremio.ufo.proxy.v3",
+        "version": "1.5.0",
         "name": ADDON_NAME,
-        "description": "Streaming con Bypass Proxy per Windows",
+        "description": "Streaming Proxy per bypassare i blocchi Windows",
         "logo": ADDON_LOGO,
         "resources": ["stream"],
         "types": ["movie", "series"],
@@ -174,7 +199,6 @@ async def manifest():
     })
 
 @app.get("/U0MQ/stream/{type}/{id}.json")
-@app.head("/U0MQ/stream/{type}/{id}.json")
 async def streams(request: Request, type: str, id: str):
     base_url = str(request.base_url).rstrip("/")
     async with AsyncSession() as client:
@@ -182,7 +206,7 @@ async def streams(request: Request, type: str, id: str):
     return respond_with(streams_data)
 
 # ============================================================================
-# ROTTA PROXY (IL CUORE DEL FIX PER WINDOWS)
+# PROXY STREAMING
 # ============================================================================
 @app.get("/proxy/stream")
 async def proxy_stream(url: str):
@@ -192,16 +216,16 @@ async def proxy_stream(url: str):
             "Referer": "https://vixsrc.to/",
             "Origin": "https://vixsrc.to"
         }
-        # httpx gestisce meglio lo streaming di grandi file rispetto a curl_cffi in questo contesto
         async with httpx.AsyncClient() as client:
             try:
+                # Timeout disabilitato per permettere flussi lunghi
                 async with client.stream("GET", url, headers=headers, follow_redirects=True, timeout=None) as r:
-                    async for chunk in r.aiter_bytes(chunk_size=16384):
+                    async for chunk in r.aiter_bytes(chunk_size=32768): # Chunk leggermente più grande per stabilità
                         yield chunk
             except Exception as e:
                 logger.error(f"❌ Proxy Stream Error: {e}")
 
-    return StreamingResponse(stream_generator(), media_type="application/x-mpegURL")
+    return StreamingResponse(stream_generator(), media_type="video/mp4")
 
 if __name__ == "__main__":
     import uvicorn
