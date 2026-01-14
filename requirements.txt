@@ -1,9 +1,8 @@
 fastapi
 uvicorn
-curl_cffi
+curl_cffi>=0.7.0
 beautifulsoup4
 lxml
 python-dotenv
 slowapi
-httpx
 jinja2
