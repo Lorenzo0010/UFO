@@ -2,21 +2,23 @@ import json
 import logging
 import re
 import os
-from typing import Dict, Optional, Any, Tuple, List
+from typing import Dict, Optional, Any, List
 from urllib.parse import urljoin
 
+# Librerie di terze parti
 from curl_cffi.requests import AsyncSession
 from bs4 import BeautifulSoup
 from fake_headers import Headers
 from dotenv import load_dotenv
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 from slowapi.middleware import SlowAPIMiddleware
 
+# Carica variabili d'ambiente
 load_dotenv()
 
 # ============================================================================
@@ -42,12 +44,15 @@ logger = logging.getLogger(__name__)
 # UTILITIES & TMDB HELPERS
 # ============================================================================
 User_Agent = "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:127.0) Gecko/20100101 Firefox/127.0"
+# Usa una chiave di default solo se non ne trovi una nell'ambiente
 TMDB_API_KEY = os.getenv('TMDB_KEY', '536b1c46da222eb34b69d168f092b495')
 
 def clean_id(id_str: str) -> str:
+    """Pulisce l'ID rimuovendo prefissi o suffissi non necessari."""
     return id_str.split(':')[0] if ':' in id_str else id_str
 
 async def get_tmdb_id_from_imdb(imdb_id: str, client: AsyncSession) -> Optional[int]:
+    """Converte un ID IMDb (tt12345) in un ID TMDB (intero)."""
     try:
         response = await client.get(
             f"https://api.themoviedb.org/3/find/{imdb_id}",
@@ -79,6 +84,7 @@ async def get_media_title(client: AsyncSession, tmdb_id: int, is_series: bool, s
             return f"Film {tmdb_id}"
         else:
             # --- SERIE TV ---
+            # Ottimizzazione: proviamo a prendere il nome dell'episodio
             ep_url = f"https://api.themoviedb.org/3/tv/{tmdb_id}/season/{season}/episode/{episode}"
             ep_resp = await client.get(ep_url, params=params, timeout=5)
             
@@ -104,8 +110,6 @@ class StreamingCommunityExtractor:
     async def extract_vixcloud_url(self, link: str, client: AsyncSession) -> List[Dict]:
         """
         Estrae l'URL della Master Playlist.
-        Analizza il file .m3u8 SOLO per determinare l'etichetta della qualità (es. 1080p),
-        ma restituisce l'URL originale per garantire che l'audio funzioni.
         """
         try:
             logger.info(f"🔍 Fetching: {link}")
@@ -143,11 +147,11 @@ class StreamingCommunityExtractor:
             separator = "&" if "?" in server_url else "?"
             final_url = f"{server_url}{separator}token={token}&expires={expires}"
             
-            # Parametri opzionali
+            # Parametri opzionali per forzare qualità
             if "?b=1" in server_url and "b=1" not in final_url: final_url += "&b=1"
             if "window.canPlayFHD = true" in video_data: final_url += "&h=1"
             
-            # Fix estensione
+            # Fix estensione .m3u8
             if ".m3u8" not in final_url:
                  if "?" in final_url:
                      base, params = final_url.split("?", 1)
@@ -155,7 +159,7 @@ class StreamingCommunityExtractor:
                  else:
                      final_url += ".m3u8"
 
-            # --- Analisi Metadata (Solo per etichetta) ---
+            # --- Analisi Metadata (Per etichetta qualità) ---
             detected_quality = "Auto"
             max_height = 0
 
@@ -226,7 +230,7 @@ class StreamingCommunityExtractor:
             for res in results:
                 streams['streams'].append({
                     "name": f"🛸 {res['quality']}", 
-                    "title": media_title, # <--- MODIFICATO QUI: Solo il titolo
+                    "title": media_title,
                     "url": res['url'],
                     "behaviorHints": {
                         "proxyHeaders": {"request": {"user-agent": User_Agent}},
@@ -266,6 +270,17 @@ def respond_with(data: Any) -> JSONResponse:
 # ============================================================================
 # ROUTES
 # ============================================================================
+
+# --- FIX: Reindirizza la root al manifest corretto (Risolve 404) ---
+@app.get("/manifest.json")
+async def root_manifest():
+    return RedirectResponse(url="/U0MQ/manifest.json")
+
+# --- FIX: Gestisce richieste HEAD (Risolve 405) ---
+@app.head("/")
+async def root_head():
+    return {"status": "online"}
+
 @app.get("/")
 async def root(request: Request):
     base_url = str(request.base_url).rstrip("/")
@@ -279,13 +294,15 @@ async def root(request: Request):
 async def manifest():
     config = {
         "id": "org.stremio.mammamia.ufo",
-        "version": "1.3.4",
+        "version": "1.3.5",
         "name": ADDON_NAME,
         "description": "VixSrc Stream via Vercel",
         "logo": ADDON_LOGO,
         "resources": ["stream"],
         "types": ["movie", "series"],
         "catalogs": [],
+        # --- FIX: Importante per dire a Stremio quali ID supporti ---
+        "idPrefixes": ["tt", "tmdb:"],
         "behaviorHints": {"configurable": False}
     }
     return respond_with(config)
