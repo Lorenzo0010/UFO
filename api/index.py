@@ -13,24 +13,21 @@ from fastapi.middleware.cors import CORSMiddleware
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 from slowapi.middleware import SlowAPIMiddleware
-import httpx
 
 load_dotenv()
 
 # ============================================================================
 # CONFIGURAZIONE
 # ============================================================================
-ADDON_NAME = "UFO PROXY REWRITER"
+ADDON_NAME = "UFO PROXY V5"
 ADDON_LOGO = "https://static.vecteezy.com/system/resources/thumbnails/050/270/611/small/ufo-logo-design-no-background-perfect-for-print-on-demand-t-shirt-design-png.png"
-
-# URL Base di VixCloud (usato per i referer)
 VIX_DOMAIN = "https://vixsrc.to"
 
+# Impostiamo un livello di log più dettagliato per debug
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-# User-Agent costante per tutto il ciclo di vita
-USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 TMDB_API_KEY = os.getenv('TMDB_KEY', '536b1c46da222eb34b69d168f092b495')
 
 # ============================================================================
@@ -70,30 +67,42 @@ async def get_media_title(client: AsyncSession, tmdb_id: int, is_series: bool, s
 class StreamingCommunityExtractor:
     async def get_vix_master_url(self, link: str, client: AsyncSession) -> list:
         try:
-            headers = {'Referer': f"{VIX_DOMAIN}/", 'User-Agent': USER_AGENT}
+            # Usiamo headers identici a Chrome per l'estrazione
+            headers = {
+                'Referer': f"{VIX_DOMAIN}/",
+                'User-Agent': USER_AGENT,
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+                'Accept-Language': 'it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7'
+            }
+            logger.info(f"🔍 Scraping pagina: {link}")
             response = await client.get(link, headers=headers, timeout=15)
-            if response.status_code != 200: return []
+            
+            if response.status_code != 200: 
+                logger.error(f"Errore status pagina: {response.status_code}")
+                return []
 
             soup = BeautifulSoup(response.text, "lxml")
             script = next((s.string for s in soup.find_all("script") if s.string and "token" in s.string), None)
-            if not script: return []
+            if not script: 
+                logger.warning("Nessun token trovato nello script")
+                return []
 
             token = re.search(r"'token':\s*'(\w+)'", script).group(1)
             expires = re.search(r"'expires':\s*'(\d+)'", script).group(1)
             raw_url = re.search(r"url:\s*'([^']+)'", script).group(1)
             
-            # Costruzione URL pulito
             final_url = f"{raw_url}?token={token}&expires={expires}"
             if "b=1" not in final_url: final_url += "&b=1"
-            # Forza 1080p se disponibile
             if "window.canPlayFHD = true" in script: final_url += "&h=1"
             
-            # Assicuriamoci che finisca per .m3u8 per compatibilità
             if ".m3u8" not in final_url:
                 base, params = final_url.split("?", 1)
                 final_url = f"{base}.m3u8?{params}"
 
             quality = "1080p" if "h=1" in final_url else "720p"
+            
+            # Logghiamo l'URL generato per debug
+            logger.info(f"✅ URL Vix Generato: {final_url[:50]}...")
             return [{"quality": quality, "url": final_url}]
         except Exception as e:
             logger.error(f"Extractor Error: {e}")
@@ -113,23 +122,24 @@ class StreamingCommunityExtractor:
             episode = parts[2] if is_series else None
             
             title = await get_media_title(client, tmdb_id, is_series, season, episode)
-            
             target_url = f'{VIX_DOMAIN}/tv/{tmdb_id}/{season}/{episode}/' if is_series else f'{VIX_DOMAIN}/movie/{tmdb_id}/'
+            
             results = await self.get_vix_master_url(target_url, client)
 
             for res in results:
-                # QUI AVVIENE LA MAGIA:
-                # Invece di dare l'url diretto, diamo l'url del NOSTRO proxy
                 encoded_vix_url = quote(res['url'])
-                proxy_link = f"{proxy_base}/proxy/playlist?url={encoded_vix_url}"
+                # Passiamo anche il referer corretto al proxy
+                encoded_referer = quote(f"{VIX_DOMAIN}/")
+                
+                proxy_link = f"{proxy_base}/proxy/playlist?url={encoded_vix_url}&ref={encoded_referer}"
                 
                 streams['streams'].append({
                     "name": f"🛸 UFO\n{res['quality']}",
-                    "title": f"{title}\n✅ Windows & Android",
+                    "title": f"{title}\n✅ Windows/Android Fix",
                     "url": proxy_link,
                     "behaviorHints": {
-                        "notWebReady": False, # Importante per Windows
-                        "bingeGroup": "ufo-rewriter"
+                        "notWebReady": False, 
+                        "bingeGroup": "ufo-proxy-v5"
                     }
                 })
         except Exception as e:
@@ -145,43 +155,24 @@ limiter = Limiter(key_func=get_remote_address)
 app.state.limiter = limiter
 app.add_middleware(SlowAPIMiddleware)
 
+# Usiamo impersonate="chrome" per bypassare i blocchi 403
 extractor = StreamingCommunityExtractor()
 
-# --- HOMEPAGE ---
 @app.get("/", response_class=HTMLResponse)
 async def root(request: Request):
     base_url = str(request.base_url).rstrip("/")
     manifest_url = f"{base_url}/U0MQ/manifest.json"
     install_url = f"stremio://{manifest_url.replace('https://', '').replace('http://', '')}"
-    
     return f"""
-    <!DOCTYPE html>
-    <html lang="it">
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>{ADDON_NAME}</title>
-        <style>
-            body {{ font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #0f0f0f; color: #e0e0e0; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }}
-            .card {{ background-color: #1a1a1a; padding: 2rem; border-radius: 12px; box-shadow: 0 8px 24px rgba(0,0,0,0.5); text-align: center; max-width: 500px; width: 90%; }}
-            img {{ width: 100px; height: 100px; border-radius: 50%; object-fit: cover; margin-bottom: 1rem; border: 2px solid #00d2ff; }}
-            h1 {{ color: #00d2ff; margin: 0 0 1rem 0; font-size: 1.5rem; }}
-            p {{ margin-bottom: 1.5rem; color: #aaaaaa; }}
-            .link-box {{ background: #000; padding: 12px; border-radius: 6px; border: 1px solid #333; word-break: break-all; font-family: monospace; color: #00ff88; margin-bottom: 1.5rem; user-select: all; }}
-            .btn {{ display: inline-block; background: #00d2ff; color: #000; padding: 12px 24px; border-radius: 6px; text-decoration: none; font-weight: bold; transition: background 0.2s; }}
-            .btn:hover {{ background: #00a3cc; }}
-        </style>
-    </head>
-    <body>
-        <div class="card">
-            <img src="{ADDON_LOGO}" alt="Logo">
-            <h1>{ADDON_NAME}</h1>
-            <p>Addon configurato con <b>Proxy Rewriting</b>.<br>Funziona su Android, Windows e Web.</p>
-            
-            <div class="link-box">{manifest_url}</div>
-            
-            <a href="{install_url}" class="btn">Installa su Stremio</a>
+    <html>
+    <body style="background:#111; color:white; font-family:sans-serif; text-align:center; padding:50px;">
+        <img src="{ADDON_LOGO}" width="100" style="border-radius:50%">
+        <h1>{ADDON_NAME}</h1>
+        <p>Proxy Attivo con bypass <b>TLS Fingerprint (Fix 403)</b></p>
+        <div style="background:#222; padding:15px; margin:20px auto; max-width:600px; word-break:break-all; font-family:monospace; border:1px solid #444;">
+            {manifest_url}
         </div>
+        <a href="{install_url}" style="background:#00d2ff; color:black; padding:10px 20px; text-decoration:none; font-weight:bold; border-radius:5px;">Installa su Stremio</a>
     </body>
     </html>
     """
@@ -189,10 +180,10 @@ async def root(request: Request):
 @app.get("/U0MQ/manifest.json")
 async def manifest():
     return JSONResponse({
-        "id": "org.ufo.rewriter.v4",
-        "version": "1.0.4",
+        "id": "org.ufo.proxy.v5",
+        "version": "1.0.5",
         "name": ADDON_NAME,
-        "description": "StreamingCommunity con Proxy integrato per Windows/Web",
+        "description": "Proxy V5 con Curl Impersonation (Fix 403)",
         "logo": ADDON_LOGO,
         "resources": ["stream"],
         "types": ["movie", "series"],
@@ -202,91 +193,97 @@ async def manifest():
 @app.get("/U0MQ/stream/{type}/{id}.json")
 async def stream_handler(request: Request, type: str, id: str):
     base_url = str(request.base_url).rstrip("/")
-    async with AsyncSession() as client:
+    # Usiamo curl_cffi anche qui
+    async with AsyncSession(impersonate="chrome") as client:
         streams = await extractor.get_streams(id, client, base_url)
     return JSONResponse(streams, headers={"Access-Control-Allow-Origin": "*"})
 
 # ============================================================================
-# IL CUORE DEL SISTEMA: IL PROXY REWRITER
+# PROXY REWRITER CON CURL_CFFI (FIX 403)
 # ============================================================================
 
-async def fetch_upstream(url: str, headers: dict):
-    """Scarica il contenuto dal server originale (VixCloud)"""
-    async with httpx.AsyncClient(follow_redirects=True, timeout=20.0) as client:
-        resp = await client.get(url, headers=headers)
-        return resp
-
 @app.get("/proxy/playlist")
-async def proxy_playlist(request: Request, url: str):
-    """
-    Questo endpoint scarica il file .m3u8, riscrive i link al suo interno
-    e lo serve a Stremio.
-    """
+async def proxy_playlist(request: Request, url: str, ref: str = f"{VIX_DOMAIN}/"):
+    """Scarica la playlist .m3u8 usando un Browser Fingerprint reale"""
     base_url = str(request.base_url).rstrip("/")
+    
     headers = {
         "User-Agent": USER_AGENT,
-        "Referer": f"{VIX_DOMAIN}/",
-        "Origin": VIX_DOMAIN
+        "Referer": ref,
+        "Origin": VIX_DOMAIN,
+        "Accept": "*/*"
     }
 
     try:
-        # 1. Scarica il master m3u8 originale
-        resp = await fetch_upstream(url, headers)
-        if resp.status_code != 200:
-            raise HTTPException(status_code=502, detail="Errore VixCloud")
+        # Usiamo AsyncSession con impersonate="chrome" per evitare il 403
+        async with AsyncSession(impersonate="chrome") as client:
+            resp = await client.get(url, headers=headers, timeout=20)
+            
+            if resp.status_code != 200:
+                logger.error(f"❌ Proxy Playlist Error: {resp.status_code} - {resp.text[:100]}")
+                return Response(f"VixCloud Error: {resp.status_code}", status_code=502)
 
-        content = resp.text
-        new_lines = []
+            content = resp.text
+            new_lines = []
 
-        # 2. Riscrivi il contenuto linea per linea
-        for line in content.splitlines():
-            line = line.strip()
-            if not line or line.startswith("#"):
-                # È un commento o metadata, lo teniamo così com'è
-                new_lines.append(line)
-            else:
-                # È un URL (assoluto o relativo)
-                # Risolviamo il link completo
-                full_segment_url = urljoin(url, line)
-                encoded_seg = quote(full_segment_url)
-                
-                # Sostituiamo con il link al nostro proxy segmenti
-                # NOTA: Usiamo /proxy/segment per i file video veri e propri
-                proxied_line = f"{base_url}/proxy/segment?url={encoded_seg}"
-                new_lines.append(proxied_line)
+            for line in content.splitlines():
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    new_lines.append(line)
+                else:
+                    # Riscriviamo i segmenti puntando al nostro proxy
+                    full_seg_url = urljoin(url, line)
+                    encoded_seg = quote(full_seg_url)
+                    encoded_ref = quote(ref)
+                    # Passiamo ref e url
+                    new_lines.append(f"{base_url}/proxy/segment?url={encoded_seg}&ref={encoded_ref}")
 
-        # 3. Restituisci la nuova playlist modificata
-        return Response(
-            content="\n".join(new_lines),
-            media_type="application/vnd.apple.mpegurl",
-            headers={"Access-Control-Allow-Origin": "*"}
-        )
+            return Response(
+                content="\n".join(new_lines),
+                media_type="application/vnd.apple.mpegurl",
+                headers={
+                    "Access-Control-Allow-Origin": "*",
+                    "Cache-Control": "no-cache"
+                }
+            )
 
     except Exception as e:
-        logger.error(f"Proxy Playlist Error: {e}")
-        return Response("Error", status_code=500)
+        logger.error(f"❌ Proxy Exception: {e}")
+        return Response("Internal Error", status_code=500)
 
 @app.get("/proxy/segment")
-async def proxy_segment(url: str):
-    """
-    Questo endpoint scarica i singoli pezzi video (.ts) e li manda al player.
-    """
+async def proxy_segment(url: str, ref: str = f"{VIX_DOMAIN}/"):
+    """Scarica i segmenti .ts fingendosi Chrome"""
     headers = {
         "User-Agent": USER_AGENT,
-        "Referer": f"{VIX_DOMAIN}/",
-        "Origin": VIX_DOMAIN
+        "Referer": ref,
+        "Origin": VIX_DOMAIN,
+        "Accept": "*/*"
     }
 
     async def iter_file():
-        async with httpx.AsyncClient(timeout=None) as client:
-            async with client.stream("GET", url, headers=headers) as r:
-                async for chunk in r.aiter_bytes():
-                    yield chunk
+        # Creiamo una sessione che supporti lo streaming
+        async with AsyncSession(impersonate="chrome") as client:
+            try:
+                # Usiamo stream=True di curl_cffi
+                async with client.request("GET", url, headers=headers, stream=True) as resp:
+                    if resp.status_code != 200:
+                        logger.error(f"Segment Error {resp.status_code} on {url}")
+                        yield b""
+                        return
+                        
+                    async for chunk in resp.aiter_content():
+                        yield chunk
+            except Exception as e:
+                logger.error(f"Segment Stream Error: {e}")
 
     return StreamingResponse(
         iter_file(), 
         media_type="video/mp2t",
-        headers={"Access-Control-Allow-Origin": "*"}
+        headers={
+            "Access-Control-Allow-Origin": "*",
+            "Cache-Control": "public, max-age=31536000"
+        }
     )
 
 if __name__ == "__main__":
