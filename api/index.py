@@ -398,6 +398,7 @@ def respond_with(data: Any) -> JSONResponse:
 # ROUTES
 # ============================================================================
 @app.get("/")
+@app.head("/")
 async def root(request: Request):
     logger.info(f"📡 ROOT endpoint called from {request.client.host}")
     base_url = str(request.base_url).rstrip("/")
@@ -408,11 +409,29 @@ async def root(request: Request):
     })
 
 @app.get("/U0MQ/manifest.json")
+@app.head("/U0MQ/manifest.json")
 async def manifest(request: Request):
     logger.info(f"📄 MANIFEST endpoint called")
     config = {
         "id": "org.stremio.mammamia.ufo",
-        "version": "1.5.0",
+        "version": "1.5.1",
+        "name": ADDON_NAME,
+        "description": "VixSrc Stream Direct Mode",
+        "logo": ADDON_LOGO,
+        "resources": ["stream"],
+        "types": ["movie", "series"],
+        "catalogs": [],
+        "behaviorHints": {"configurable": False}
+    }
+    return respond_with(config)
+
+@app.get("/manifest.json")
+@app.head("/manifest.json")
+async def manifest_root(request: Request):
+    logger.info(f"📄 MANIFEST endpoint called (root)")
+    config = {
+        "id": "org.stremio.mammamia.ufo",
+        "version": "1.5.1",
         "name": ADDON_NAME,
         "description": "VixSrc Stream Direct Mode",
         "logo": ADDON_LOGO,
@@ -424,10 +443,11 @@ async def manifest(request: Request):
     return respond_with(config)
 
 @app.get("/U0MQ/stream/{type}/{id}.json")
+@app.head("/U0MQ/stream/{type}/{id}.json")
 @limiter.limit("10/second")
 async def streams(request: Request, type: str, id: str):
     logger.info(f"=" * 80)
-    logger.info(f"🎬 STREAM REQUEST")
+    logger.info(f"🎬 STREAM REQUEST ({request.method})")
     logger.info(f"   From: {request.client.host}")
     logger.info(f"   Type: {type}")
     logger.info(f"   ID: {id}")
@@ -453,7 +473,9 @@ async def streams(request: Request, type: str, id: str):
         return respond_with({"streams": []})
 
 @app.get("/U0MQ/meta/{type}/{id}.json")
+@app.head("/U0MQ/meta/{type}/{id}.json")
 async def meta(type: str, id: str):
+    logger.debug(f"📋 META endpoint called")
     return respond_with({
         "meta": {
             "id": id,
@@ -464,10 +486,13 @@ async def meta(type: str, id: str):
     })
 
 @app.get("/U0MQ/catalog/{type}/{id}.json")
+@app.head("/U0MQ/catalog/{type}/{id}.json")
 async def catalog(type: str, id: str):
+    logger.debug(f"📚 CATALOG endpoint called")
     return respond_with({"metas": []})
 
 @app.get("/debug/status")
+@app.head("/debug/status")
 async def debug_status(request: Request):
     logger.info(f"🔧 DEBUG STATUS endpoint called")
     return respond_with({
