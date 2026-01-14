@@ -6,3 +6,4 @@ fake_headers
 python-dotenv
 slowapi
 lxml
+requests
