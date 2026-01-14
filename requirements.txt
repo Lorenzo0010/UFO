@@ -1,8 +1,8 @@
 fastapi
 uvicorn
 curl_cffi
-fake-headers
 beautifulsoup4
 lxml
-slowapi
 python-dotenv
+slowapi
+httpx
