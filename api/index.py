@@ -26,9 +26,18 @@ SC_DOMAIN = "https://vixsrc.to"
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-# LO STESSO USER AGENT DI MAMMA MIA (Linux based)
+# USER AGENT (Linux based - come MammaMia)
 USER_AGENT = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 TMDB_API_KEY = os.getenv('TMDB_KEY', '536b1c46da222eb34b69d168f092b495')
+
+# HEADERS GLOBALI PER IL PROXY
+PROXY_HEADERS = {
+    "User-Agent": USER_AGENT,
+    "Referer": f"{SC_DOMAIN}/",
+    "Origin": f"{SC_DOMAIN}",
+    "Accept": "*/*",
+    "Connection": "keep-alive"
+}
 
 # ============================================================================
 # UTILS
@@ -62,7 +71,7 @@ async def get_media_title(client: AsyncSession, tmdb_id: int, is_series: bool, s
         return "Video"
 
 # ============================================================================
-# EXTRACTOR (LOGICA DI MAMMA MIA ADATTATA)
+# EXTRACTOR
 # ============================================================================
 class StreamingCommunityExtractor:
     async def get_vix_master_url(self, link: str, client: AsyncSession) -> list:
@@ -78,25 +87,22 @@ class StreamingCommunityExtractor:
             if response.status_code != 200: return []
 
             soup = BeautifulSoup(response.text, "lxml")
-            script_tag = soup.find("script", string=re.compile("token"))
             
-            if not script_tag: 
-                # Fallback: cerca in tutti gli script se find non va
-                for s in soup.find_all("script"):
-                    if s.string and "token" in s.string:
-                        script_tag = s
-                        break
+            # Ricerca script token più robusta
+            script_content = None
+            for s in soup.find_all("script"):
+                if s.string and "token" in s.string and "expires" in s.string:
+                    script_content = s.string
+                    break
             
-            if not script_tag: return []
-            
-            script = script_tag.string
+            if not script_content: return []
 
-            token = re.search(r"'token':\s*'(\w+)'", script).group(1)
-            expires = re.search(r"'expires':\s*'(\d+)'", script).group(1)
-            server_url = re.search(r"url:\s*'([^']+)'", script).group(1)
+            token = re.search(r"'token':\s*'(\w+)'", script_content).group(1)
+            expires = re.search(r"'expires':\s*'(\d+)'", script_content).group(1)
+            server_url = re.search(r"url:\s*'([^']+)'", script_content).group(1)
             
             try:
-                quality_match = re.search(r'"quality":(\d+)', script)
+                quality_match = re.search(r'"quality":(\d+)', script_content)
                 quality_lbl = f"{quality_match.group(1)}p" if quality_match else "720p"
             except:
                 quality_lbl = "720p"
@@ -104,11 +110,11 @@ class StreamingCommunityExtractor:
             separator = "&" if "?b=1" in server_url else "?"
             final_url = f"{server_url}{separator}token={token}&expires={expires}"
             
-            if "window.canPlayFHD = true" in script:
+            if "window.canPlayFHD = true" in script_content:
                 final_url += "&h=1"
                 quality_lbl = "1080p"
             
-            # TRUCCO .m3u8 (Importante per compatibilità player)
+            # Aggiunta estensione .m3u8 se mancante
             if ".m3u8" not in final_url:
                 parts = final_url.split("?")
                 final_url = f"{parts[0]}.m3u8?{parts[1]}"
@@ -137,10 +143,7 @@ class StreamingCommunityExtractor:
             results = await self.get_vix_master_url(target_url, client)
 
             for res in results:
-                # ENCODIAMO L'URL PER IL PROXY
                 encoded_vix_url = quote(res['url'])
-                
-                # Creiamo il link che passa per il nostro server
                 proxy_link = f"{proxy_base}/proxy/playlist?url={encoded_vix_url}"
                 
                 streams['streams'].append({
@@ -148,8 +151,8 @@ class StreamingCommunityExtractor:
                     "title": f"{title}\n✅ Proxy Attivo",
                     "url": proxy_link,
                     "behaviorHints": {
-                        "notWebReady": False, # False = Funziona nel browser (perché usiamo il proxy)
-                        "bingeGroup": "ufo-proxy-final"
+                        "notWebReady": False, 
+                        "bingeGroup": "ufo-proxy-fixed"
                     }
                 })
         except Exception as e:
@@ -175,9 +178,9 @@ async def root(request: Request):
     return f"""
     <html>
     <body style="background:#0b0b0b; color:#eee; font-family:sans-serif; text-align:center; padding:40px;">
-        <img src="{ADDON_LOGO}" width="120" style="border-radius:20px; box-shadow: 0 0 20px rgba(0,210,255,0.3);">
+        <img src="{ADDON_LOGO}" width="120" style="border-radius:20px;">
         <h1 style="color:#00d2ff">{ADDON_NAME}</h1>
-        <p>Sistema Proxy Integrato (MediaFlow-like)</p>
+        <p>Fix Proxy Segmenti</p>
         <div style="background:#1a1a1a; padding:15px; border-radius:8px; display:inline-block; border:1px solid #333; margin:20px 0;">
             <code style="color:#00ff88; font-size:1.1em;">{manifest_url}</code>
         </div><br>
@@ -189,10 +192,10 @@ async def root(request: Request):
 @app.get("/U0MQ/manifest.json")
 async def manifest():
     return JSONResponse({
-        "id": "org.ufo.proxy.final",
-        "version": "2.0.0",
+        "id": "org.ufo.proxy.fixed",
+        "version": "2.0.1",
         "name": ADDON_NAME,
-        "description": "Proxy VixSrc compatibile Windows/Web/Android",
+        "description": "Proxy VixSrc Fixed",
         "logo": ADDON_LOGO,
         "resources": ["stream"],
         "types": ["movie", "series"],
@@ -207,76 +210,62 @@ async def stream_handler(request: Request, type: str, id: str):
     return JSONResponse(streams, headers={"Access-Control-Allow-Origin": "*"})
 
 # ============================================================================
-# PROXY ENGINE (IL CUORE DEL SISTEMA)
+# PROXY ENGINE FIX
 # ============================================================================
-
-# Headers esatti che VixCloud si aspetta (presi da Mamma Mia)
-PROXY_HEADERS = {
-    "User-Agent": USER_AGENT,
-    "Referer": f"{SC_DOMAIN}/",
-    "Origin": f"{SC_DOMAIN}",
-    "Accept": "*/*",
-    "Accept-Encoding": "gzip, deflate, br",
-    "Connection": "keep-alive"
-}
 
 @app.get("/proxy/playlist")
 async def proxy_playlist(request: Request, url: str):
     base_url = str(request.base_url).rstrip("/")
-    
     try:
-        # Usa impersonate="chrome" per simulare un vero browser e bypassare il 403
         async with AsyncSession(impersonate="chrome") as client:
             resp = await client.get(url, headers=PROXY_HEADERS, timeout=20)
             
             if resp.status_code != 200:
-                logger.error(f"❌ Proxy Playlist Error: {resp.status_code}")
-                # Se fallisce, proviamo a ritornare un 502 generico
                 return Response(status_code=502)
 
             content = resp.text
             new_lines = []
 
-            # HLS Rewriting: Cambia i link dei segmenti per farli passare dal proxy
             for line in content.splitlines():
                 line = line.strip()
                 if not line or line.startswith("#"):
                     new_lines.append(line)
                 else:
-                    # Risolvi URL relativo -> assoluto
                     full_seg_url = urljoin(url, line)
                     encoded_seg = quote(full_seg_url)
-                    # Punta al nostro endpoint /proxy/segment
                     new_lines.append(f"{base_url}/proxy/segment?url={encoded_seg}")
 
             return Response(
                 content="\n".join(new_lines),
                 media_type="application/vnd.apple.mpegurl",
-                headers={
-                    "Access-Control-Allow-Origin": "*",
-                    "Cache-Control": "no-cache, no-store, must-revalidate"
-                }
+                headers={"Access-Control-Allow-Origin": "*"}
             )
 
     except Exception as e:
-        logger.error(f"❌ Proxy Exception: {e}")
+        logger.error(f"Playlist Error: {e}")
         return Response(status_code=500)
 
 @app.get("/proxy/segment")
 async def proxy_segment(url: str):
-    # Generatore asincrono per lo streaming
+    # Generatore per lo streaming
     async def iter_file():
+        # Creiamo la sessione
         async with AsyncSession(impersonate="chrome") as client:
             try:
-                # stream=True è fondamentale per i video
-                async with client.request("GET", url, headers=PROXY_HEADERS, stream=True) as resp:
-                    if resp.status_code != 200:
-                        yield b""
-                        return
-                    async for chunk in resp.aiter_content():
-                        yield chunk
+                # FIX: Usiamo await client.get con stream=True invece di async with client.request
+                resp = await client.get(url, headers=PROXY_HEADERS, stream=True)
+                
+                if resp.status_code != 200:
+                    logger.error(f"Segment Error Status: {resp.status_code}")
+                    yield b""
+                    return
+
+                # Iteriamo sul contenuto
+                async for chunk in resp.aiter_content():
+                    yield chunk
+
             except Exception as e:
-                logger.error(f"Segment Error: {e}")
+                logger.error(f"Segment Exception: {e}")
 
     return StreamingResponse(
         iter_file(), 
