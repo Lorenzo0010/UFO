@@ -88,7 +88,6 @@ async def get_media_title(client: AsyncSession, tmdb_id: int, is_series: bool, s
             
             if ep_resp.status_code == 200:
                 ep_data = ep_resp.json()
-                # Ritorna il nome dell'episodio se disponibile, altrimenti fallback
                 return ep_data.get('name', f"Episodio {episode}")
             
             return f"Episodio {episode}"
@@ -108,7 +107,7 @@ class StreamingCommunityExtractor:
 
     async def extract_vixcloud_url(self, link: str, client: AsyncSession) -> List[Dict]:
         """
-        Estrae l'URL della Master Playlist da VixCloud/VixSrc.
+        Estrae l'URL della Master Playlist.
         """
         try:
             logger.info(f"🔍 Fetching: {link}")
@@ -146,11 +145,9 @@ class StreamingCommunityExtractor:
             separator = "&" if "?" in server_url else "?"
             final_url = f"{server_url}{separator}token={token}&expires={expires}"
             
-            # Parametri opzionali
             if "?b=1" in server_url and "b=1" not in final_url: final_url += "&b=1"
             if "window.canPlayFHD = true" in video_data: final_url += "&h=1"
             
-            # Fix estensione m3u8
             if ".m3u8" not in final_url:
                  if "?" in final_url:
                      base, params = final_url.split("?", 1)
@@ -158,7 +155,7 @@ class StreamingCommunityExtractor:
                  else:
                      final_url += ".m3u8"
 
-            # --- Analisi Metadata (Solo per etichetta qualità) ---
+            # --- Analisi Metadata ---
             detected_quality = "Auto"
             max_height = 0
 
@@ -270,13 +267,12 @@ def respond_with(data: Any) -> JSONResponse:
 # ROUTES
 # ============================================================================
 
-# --- FIX CRITICO: Gestisce sia GET che HEAD per il manifest alla root ---
-# Questo risolve l'errore 405 quando Stremio verifica l'addon.
+# --- FIX: Root manifest con supporto HEAD (Risolve il primo 405) ---
 @app.api_route("/manifest.json", methods=["GET", "HEAD"])
 async def root_manifest():
     return RedirectResponse(url="/U0MQ/manifest.json")
 
-# --- FIX: Gestisce richieste HEAD sulla root (es. controlli di uptime) ---
+# --- FIX: Supporto HEAD per la root (Ping di uptime) ---
 @app.head("/")
 async def root_head():
     return {"status": "online"}
@@ -290,18 +286,19 @@ async def root(request: Request):
         "manifest": f"{base_url}/U0MQ/manifest.json"
     })
 
-@app.get("/U0MQ/manifest.json")
+# --- FIX CRITICO: Anche la destinazione deve supportare HEAD (Risolve il secondo 405) ---
+@app.api_route("/U0MQ/manifest.json", methods=["GET", "HEAD"])
 async def manifest():
     config = {
         "id": "org.stremio.mammamia.ufo",
-        "version": "1.3.6", # Versione incrementata
+        "version": "1.3.8",
         "name": ADDON_NAME,
         "description": "VixSrc Stream via Vercel",
         "logo": ADDON_LOGO,
         "resources": ["stream"],
         "types": ["movie", "series"],
         "catalogs": [],
-        "idPrefixes": ["tt", "tmdb:"], # Fondamentale per il matching corretto
+        "idPrefixes": ["tt", "tmdb:"],
         "behaviorHints": {"configurable": False}
     }
     return respond_with(config)
