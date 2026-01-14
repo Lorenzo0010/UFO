@@ -1,9 +1,8 @@
+bs4
+curl_cffi
+fake-headers
 fastapi
 uvicorn
-curl_cffi
-beautifulsoup4
-fake_headers
 python-dotenv
 slowapi
 lxml
-requests
