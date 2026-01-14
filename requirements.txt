@@ -6,4 +6,4 @@ lxml
 python-dotenv
 slowapi
 httpx
-fake-headers
+jinja2
