@@ -19,16 +19,12 @@ from slowapi import Limiter
 from slowapi.util import get_remote_address
 from slowapi.middleware import SlowAPIMiddleware
 
-# Carica variabili d'ambiente
 load_dotenv()
 
 # ============================================================================
-# CONFIGURAZIONE LOGGING (DEBUG LEVEL)
+# CONFIGURAZIONE
 # ============================================================================
-logging.basicConfig(
-    level=logging.INFO, # Abbassato a INFO per pulizia, usa DEBUG se serve
-    format="%(asctime)s - %(levelname)s - %(message)s"
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
 ADDON_NAME = "UFO addon"
@@ -36,11 +32,13 @@ ADDON_LOGO = "https://static.vecteezy.com/system/resources/thumbnails/050/270/61
 TMDB_API_KEY = os.getenv('TMDB_KEY', '536b1c46da222eb34b69d168f092b495')
 DOMAIN = "https://vixsrc.to"
 
+# USER AGENT STATICO (Importante per Windows/MPV)
+# Usiamo un UA di Chrome Windows per massimizzare la compatibilità col player desktop
+User_Agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+
 # ============================================================================
 # UTILITIES
 # ============================================================================
-User_Agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-
 def clean_id(id_str: str) -> str:
     return id_str.split(':')[0] if ':' in id_str else id_str
 
@@ -56,8 +54,7 @@ async def get_tmdb_id_from_imdb(imdb_id: str, client: AsyncSession) -> Optional[
             if data.get('movie_results'): return data['movie_results'][0].get('id')
             if data.get('tv_results'): return data['tv_results'][0].get('id')
         return None
-    except Exception as e:
-        logger.error(f"❌ Error converting IMDb ID: {e}")
+    except Exception:
         return None
 
 async def get_media_title(client: AsyncSession, tmdb_id: int, is_series: bool, season: str = None, episode: str = None) -> str:
@@ -75,7 +72,7 @@ async def get_media_title(client: AsyncSession, tmdb_id: int, is_series: bool, s
             if ep_resp.status_code == 200:
                 return ep_resp.json().get('name', f"Episodio {episode}")
             return f"Episodio {episode}"
-    except Exception as e:
+    except Exception:
         return "Video"
 
 # ============================================================================
@@ -83,14 +80,19 @@ async def get_media_title(client: AsyncSession, tmdb_id: int, is_series: bool, s
 # ============================================================================
 class StreamingCommunityExtractor:
     def __init__(self):
-        self.random_headers = Headers()
+        pass
 
     async def extract_vixcloud_url(self, link: str, client: AsyncSession) -> List[Dict]:
         logger.info(f"🔍 Fetching: {link}")
         try:
-            headers = self.random_headers.generate()
-            headers['Referer'] = f"{DOMAIN}/"
-            headers['User-Agent'] = User_Agent
+            # Header specifici per la richiesta di estrazione
+            headers = {
+                'User-Agent': User_Agent,
+                'Referer': f"{DOMAIN}/",
+                'Origin': DOMAIN,
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+                'Accept-Language': 'it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7'
+            }
             
             response = await client.get(link, headers=headers, timeout=15)
             if response.status_code != 200: return []
@@ -112,24 +114,22 @@ class StreamingCommunityExtractor:
             
             if not all([token_match, expires_match, url_match]): return []
 
-            server_url = url_match.group(1)
+            server_url = url_match.group(1).strip() # Strip rimuove spazi invisibili
             token = token_match.group(1)
             expires = expires_match.group(1)
 
-            # --- FIX URL COSTRUZIONE ---
-            # Se c'è già un '?', usiamo '&', altrimenti '?'
+            # --- COSTRUZIONE URL ROBUSTA ---
             separator = "&" if "?" in server_url else "?"
             final_url = f"{server_url}{separator}token={token}&expires={expires}"
             
-            # Parametri opzionali (solo se non esistono già)
             if "b=1" not in final_url: 
-                # Alcuni server richiedono b=1, a volte è già nell'url base
-                if "b=1" in server_url: pass # È già lì
+                if "b=1" in server_url: pass 
                 else: final_url += "&b=1"
 
+            # Nota: 'h=1' (PlayFHD) a volte rompe MPV su connessioni lente/instabili, 
+            # lo lasciamo solo se esplicitamente richiesto dallo script
             if "window.canPlayFHD = true" in video_data: final_url += "&h=1"
             
-            # Fix estensione .m3u8
             if ".m3u8" not in final_url:
                 if "?" in final_url:
                     base, params = final_url.split("?", 1)
@@ -137,9 +137,7 @@ class StreamingCommunityExtractor:
                 else:
                     final_url += ".m3u8"
 
-            logger.info(f"✅ URL Generato Correttamente")
-            # Logghiamo l'URL solo se necessario per debug, nascondiamolo in produzione
-            # logger.info(final_url) 
+            logger.info(f"✅ URL Generato")
             
             return [{
                 "quality": "1080p", 
@@ -184,12 +182,18 @@ class StreamingCommunityExtractor:
                     "behaviorHints": {
                         "notWebReady": True,
                         "bingeGroup": "streamingcommunity",
-                        # --- FIX HEADERS PER IL PLAYER ---
+                        # --- FIX WINDOWS/MPV HEADERS ---
+                        # MPV richiede headers precisi per superare Cloudflare/DDoS-Guard
                         "proxyHeaders": {
                             "request": {
                                 "User-Agent": User_Agent,
                                 "Referer": f"{DOMAIN}/",
-                                "Origin": DOMAIN
+                                "Origin": DOMAIN,
+                                "Accept-Language": "it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7",
+                                "Connection": "keep-alive",
+                                "Sec-Fetch-Dest": "empty",
+                                "Sec-Fetch-Mode": "cors",
+                                "Sec-Fetch-Site": "cross-site"
                             }
                         }
                     }
@@ -248,9 +252,9 @@ async def root(request: Request):
 async def manifest(request: Request):
     config = {
         "id": "org.stremio.mammamia.ufo",
-        "version": "1.4.0", # Versione Major update
+        "version": "1.4.1", # Incremento versione per forzare aggiornamento
         "name": ADDON_NAME,
-        "description": "VixSrc Fix Playback",
+        "description": "VixSrc Windows Fix",
         "logo": ADDON_LOGO,
         "resources": ["stream"],
         "types": ["movie", "series"],
