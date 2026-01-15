@@ -4,12 +4,10 @@ import re
 import os
 from typing import Dict, Optional, Any, Tuple, List
 from urllib.parse import urljoin
-
 from curl_cffi.requests import AsyncSession
 from bs4 import BeautifulSoup, SoupStrainer
 from fake_headers import Headers
 from dotenv import load_dotenv
-
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -22,6 +20,7 @@ load_dotenv()
 # ============================================================================
 # CONFIGURAZIONE
 # ============================================================================
+
 ADDON_NAME = "UFO addon"
 ADDON_LOGO = "https://static.vecteezy.com/system/resources/thumbnails/050/270/611/small/ufo-logo-design-no-background-perfect-for-print-on-demand-t-shirt-design-png.png"
 
@@ -45,6 +44,7 @@ logger = logging.getLogger(__name__)
 # ============================================================================
 # UTILITIES & TMDB HELPERS
 # ============================================================================
+
 User_Agent = "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:127.0) Gecko/20100101 Firefox/127.0"
 TMDB_API_KEY = os.getenv('TMDB_KEY', '536b1c46da222eb34b69d168f092b495')
 
@@ -91,7 +91,7 @@ async def get_media_title(client: AsyncSession, tmdb_id: int, is_series: bool, s
                 return ep_data.get('name', f"Episodio {episode}")
             
             return f"Episodio {episode}"
-            
+        
     except Exception as e:
         logger.error(f"❌ Errore recupero titolo TMDB: {e}")
         if is_series: return f"Episodio {episode}"
@@ -100,6 +100,7 @@ async def get_media_title(client: AsyncSession, tmdb_id: int, is_series: bool, s
 # ============================================================================
 # EXTRACTORS
 # ============================================================================
+
 class StreamingCommunityExtractor:
     def __init__(self):
         self.domain = CONFIG['Siti']['StreamingCommunity']['url']
@@ -150,17 +151,16 @@ class StreamingCommunityExtractor:
             if "window.canPlayFHD = true" in video_data: final_url += "&h=1"
             
             # Fix estensione
-            if ".m3u8" not in final_url:
-                 if "?" in final_url:
-                     base, params = final_url.split("?", 1)
-                     if not base.endswith(".m3u8"): final_url = f"{base}.m3u8?{params}"
-                 else:
-                     final_url += ".m3u8"
+            if ".m3u8" not in final_url: 
+                if "?" in final_url: 
+                    base, params = final_url.split("?", 1) 
+                    if not base.endswith(".m3u8"): final_url = f"{base}.m3u8?{params}"
+                else: 
+                    final_url += ".m3u8"
 
             # --- Analisi Metadata (Solo per etichetta) ---
             detected_quality = "Auto"
             max_height = 0
-
             try:
                 m3u8_res = await client.get(final_url, headers=headers, timeout=6)
                 if m3u8_res.status_code == 200:
@@ -175,7 +175,7 @@ class StreamingCommunityExtractor:
                     
                     if max_height > 0:
                         detected_quality = f"{max_height}p"
-                        
+                
             except Exception as e:
                 logger.warning(f"⚠️ [VixSrc] Impossibile analizzare metadata m3u8: {e}")
 
@@ -239,11 +239,12 @@ class StreamingCommunityExtractor:
 
         except Exception as e:
             logger.error(f"❌ [VixSrc] Stream Error: {e}")
+        
         return streams
 
 
 class CB01Extractor:
-    """Estrattore CB01 con parsing completo"""
+    """Estrattore CB01 con parsing completo e fix parametri"""
     def __init__(self):
         self.domain = CONFIG['Siti']['CB01']['url']
         self.random_headers = Headers()
@@ -257,8 +258,8 @@ class CB01Extractor:
                 'x-requested-with': 'XMLHttpRequest',
             }
             data = {'id': link.split("/")[-2], 'ref': ''}
-            response = await client.post('https://stayonline.pro/ajax/linkEmbedView.php', 
-                                       headers=headers, data=data, timeout=10)
+            response = await client.post('https://stayonline.pro/ajax/linkEmbedView.php',
+                                        headers=headers, data=data, timeout=10)
             real_url = response.json()['data']['value']
             logger.info(f"✅ [CB01] StayOnline bypassed: {real_url[:80]}...")
             return real_url
@@ -266,7 +267,7 @@ class CB01Extractor:
             logger.warning(f"⚠️ [CB01] StayOnline error: {e}")
             return None
 
-    async def get_maxstream(self, link: str, streams: Dict, client: AsyncSession) -> Dict:
+    async def get_maxstream(self, link: str, streams: Dict, client: AsyncSession, media_title: str = "Film") -> Dict:
         """Estrae stream da maxstream/uprot"""
         try:
             # Se è stayonline, bypass prima
@@ -280,7 +281,7 @@ class CB01Extractor:
             # Aggiunge lo stream con note sulla captcha se necessario
             streams['streams'].append({
                 "name": "📺 CB01",
-                "title": "Stream disponibile (Potrebbe richiedere Captcha)",
+                "title": f"{media_title}\n(Potrebbe richiedere Captcha)",
                 "url": link,
                 "behaviorHints": {
                     "proxyHeaders": {"request": {"user-agent": User_Agent}},
@@ -293,7 +294,7 @@ class CB01Extractor:
             logger.error(f"❌ [CB01] Maxstream error: {e}")
             return streams
 
-    async def movie_redirect_url(self, link: str, client: AsyncSession, streams: Dict) -> Dict:
+    async def movie_redirect_url(self, link: str, client: AsyncSession, streams: Dict, media_title: str = "") -> Dict:
         """Estrae video da pagina film CB01"""
         try:
             logger.info(f"🔗 [CB01] Parsing movie page: {link}")
@@ -310,10 +311,10 @@ class CB01Extractor:
             
             if redirect_url and redirect_url.get("data-src"):
                 real_url = redirect_url.get("data-src")
-                streams = await self.get_maxstream(real_url, streams, client)
+                streams = await self.get_maxstream(real_url, streams, client, media_title)
             elif redirect_url_2 and redirect_url_2.get("data-src"):
                 real_url = redirect_url_2.get("data-src")
-                streams = await self.get_maxstream(real_url, streams, client)
+                streams = await self.get_maxstream(real_url, streams, client, media_title)
             else:
                 logger.warning(f"⚠️ [CB01] Nessun video trovato nella pagina")
                 # Fallback: aggiungi il link della pagina come stream
@@ -333,7 +334,7 @@ class CB01Extractor:
             logger.error(f"❌ [CB01] Movie redirect error: {e}")
             return streams
 
-    async def series_redirect_url(self, link: str, season: str, episode: str, client: AsyncSession, streams: Dict) -> Dict:
+    async def series_redirect_url(self, link: str, season: str, episode: str, client: AsyncSession, streams: Dict, media_title: str = "") -> Dict:
         """Estrae video da pagina serie CB01"""
         try:
             episode = episode.zfill(2)
@@ -364,7 +365,7 @@ class CB01Extractor:
                             if links:
                                 video_url = links[0].get('href')
                                 if video_url:
-                                    streams = await self.get_maxstream(video_url, streams, client)
+                                    streams = await self.get_maxstream(video_url, streams, client, media_title)
                                     logger.info(f"✅ [CB01] Episode found and extracted")
                                     return streams
             
@@ -393,6 +394,7 @@ class CB01Extractor:
             cards = soup.find_all('div', class_='card-content')
             
             year_pattern = re.compile(r'(19|20)\d{2}')
+            
             for card in cards:
                 try:
                     link_tag = card.find('h3', class_='card-title')
@@ -418,7 +420,6 @@ class CB01Extractor:
             
             logger.warning(f"⚠️ [CB01] No movie found for: {showname} ({date})")
             return None
-
         except Exception as e:
             logger.error(f"❌ [CB01] Search error: {e}")
             return None
@@ -442,6 +443,7 @@ class CB01Extractor:
             cards = soup.find_all('div', class_='card-content')
             
             year_pattern = re.compile(r'(19|20)\d{2}')
+            
             for card in cards:
                 try:
                     link_tag = card.find('h3', class_='card-title')
@@ -471,7 +473,6 @@ class CB01Extractor:
             
             logger.warning(f"⚠️ [CB01] No series found for: {showname} ({date})")
             return None
-
         except Exception as e:
             logger.error(f"❌ [CB01] Search error: {e}")
             return None
@@ -542,6 +543,7 @@ class CB01Extractor:
 # ============================================================================
 # FASTAPI SETUP
 # ============================================================================
+
 app = FastAPI(title=f"{ADDON_NAME} Addon")
 
 app.add_middleware(
@@ -568,6 +570,7 @@ def respond_with(data: Any) -> JSONResponse:
 # ============================================================================
 # ROUTES
 # ============================================================================
+
 @app.get("/")
 async def root(request: Request):
     base_url = str(request.base_url).rstrip("/")
@@ -617,11 +620,12 @@ async def streams(request: Request, type: str, id: str):
                 if cb01_streams.get('streams'):
                     streams_data['streams'].extend(cb01_streams['streams'])
                     logger.info(f"✅ Aggiunto CB01 come fallback")
+
+            if not streams_data: 
+                streams_data = {"streams": []}
+                
+            logger.info(f"📊 Total streams found: {len(streams_data.get('streams', []))}")
         
-        if not streams_data: 
-            streams_data = {"streams": []}
-        
-        logger.info(f"📊 Total streams found: {len(streams_data.get('streams', []))}")
         return respond_with(streams_data)
     except Exception as e:
         logger.error(f"❌ Stream endpoint error: {e}")
