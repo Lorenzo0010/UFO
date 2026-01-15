@@ -1,3 +1,7 @@
+# ============================================================================
+# main.py - VixSrc + CB01 Stremio Addon
+# ============================================================================
+
 import json
 import logging
 import re
@@ -6,7 +10,7 @@ from typing import Dict, Optional, Any, Tuple, List
 from urllib.parse import urljoin
 
 from curl_cffi.requests import AsyncSession
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, SoupStrainer
 from fake_headers import Headers
 from dotenv import load_dotenv
 
@@ -29,6 +33,10 @@ CONFIG = {
     "Siti": {
         "StreamingCommunity": {
             "url": "https://vixsrc.to", 
+            "enabled": "1"
+        },
+        "CB01": {
+            "url": "https://cb01.uno",
             "enabled": "1"
         }
     }
@@ -94,7 +102,7 @@ async def get_media_title(client: AsyncSession, tmdb_id: int, is_series: bool, s
         return "Film"
 
 # ============================================================================
-# EXTRACTOR
+# EXTRACTORS
 # ============================================================================
 class StreamingCommunityExtractor:
     def __init__(self):
@@ -103,12 +111,10 @@ class StreamingCommunityExtractor:
 
     async def extract_vixcloud_url(self, link: str, client: AsyncSession) -> List[Dict]:
         """
-        Estrae l'URL della Master Playlist.
-        Analizza il file .m3u8 SOLO per determinare l'etichetta della qualità (es. 1080p),
-        ma restituisce l'URL originale per garantire che l'audio funzioni.
+        Estrae l'URL della Master Playlist da VixSrc.
         """
         try:
-            logger.info(f"🔍 Fetching: {link}")
+            logger.info(f"🔍 [VixSrc] Fetching: {link}")
             headers = self.random_headers.generate()
             headers['Referer'] = f"{self.domain}/"
             headers['User-Agent'] = User_Agent
@@ -175,14 +181,14 @@ class StreamingCommunityExtractor:
                         detected_quality = f"{max_height}p"
                         
             except Exception as e:
-                logger.warning(f"⚠️ Impossibile analizzare metadata m3u8: {e}")
+                logger.warning(f"⚠️ [VixSrc] Impossibile analizzare metadata m3u8: {e}")
 
             if max_height == 0 and "window.canPlayFHD = true" in video_data:
                 detected_quality = "1080p"
             elif max_height == 0:
                 detected_quality = "720p"
 
-            logger.info(f"✅ URL Master generato. Qualità rilevata: {detected_quality}")
+            logger.info(f"✅ [VixSrc] URL Master generato. Qualità: {detected_quality}")
             
             return [{
                 "quality": detected_quality,
@@ -191,7 +197,7 @@ class StreamingCommunityExtractor:
             }]
 
         except Exception as e:
-            logger.error(f"❌ Extractor Error: {e}")
+            logger.error(f"❌ [VixSrc] Extractor Error: {e}")
             return []
 
     async def get_streams(self, id: str, client: AsyncSession) -> Dict:
@@ -225,18 +231,182 @@ class StreamingCommunityExtractor:
             
             for res in results:
                 streams['streams'].append({
-                    "name": f"🛸 {res['quality']}", 
-                    "title": media_title, # <--- MODIFICATO QUI: Solo il titolo
+                    "name": f"🛸 VixSrc {res['quality']}", 
+                    "title": media_title,
                     "url": res['url'],
                     "behaviorHints": {
                         "proxyHeaders": {"request": {"user-agent": User_Agent}},
                         "notWebReady": True,
-                        "bingeGroup": "streamingcommunity"
+                        "bingeGroup": "vixsrc"
                     }
                 })
 
         except Exception as e:
-            logger.error(f"❌ Stream Error: {e}")
+            logger.error(f"❌ [VixSrc] Stream Error: {e}")
+        return streams
+
+
+class CB01Extractor:
+    """Estrattore CB01 minimale"""
+    def __init__(self):
+        self.domain = CONFIG['Siti']['CB01']['url']
+        self.random_headers = Headers()
+
+    async def search_movie(self, showname: str, date: str, client: AsyncSession) -> Optional[str]:
+        """Cerca un film su CB01"""
+        try:
+            showname_clean = showname.replace(" ", "+").replace("ò", "o").replace("è", "e").replace("à", "a")
+            headers = self.random_headers.generate()
+            headers['Referer'] = f'{self.domain}/'
+            
+            query = f'{self.domain}/?s={showname_clean}'
+            logger.info(f"🔍 [CB01] Searching movie: {showname} ({date})")
+            
+            response = await client.get(query, headers=headers, timeout=10)
+            if response.status_code != 200:
+                logger.warning(f"⚠️ [CB01] Failed to fetch search: {response.status_code}")
+                return None
+
+            soup = BeautifulSoup(response.text, 'lxml', parse_only=SoupStrainer('div', class_='card-content'))
+            cards = soup.find_all('div', class_='card-content')
+            
+            year_pattern = re.compile(r'(19|20)\d{2}')
+            for card in cards:
+                try:
+                    link_tag = card.find('h3', class_='card-title').find('a')
+                    if not link_tag:
+                        continue
+                    href = link_tag.get('href')
+                    date_text = href.split("/")[-2] if href else ""
+                    
+                    match = year_pattern.search(date_text)
+                    if match and match.group(0) == date:
+                        logger.info(f"✅ [CB01] Found movie: {href}")
+                        return href
+                except Exception as e:
+                    logger.debug(f"⚠️ [CB01] Error parsing card: {e}")
+                    continue
+            
+            logger.warning(f"⚠️ [CB01] No movie found for: {showname} ({date})")
+            return None
+
+        except Exception as e:
+            logger.error(f"❌ [CB01] Search error: {e}")
+            return None
+
+    async def search_series(self, showname: str, date: str, client: AsyncSession) -> Optional[str]:
+        """Cerca una serie su CB01"""
+        try:
+            showname_clean = showname.replace(" ", "+")
+            headers = self.random_headers.generate()
+            headers['Referer'] = f'{self.domain}/serietv/'
+            
+            query = f'{self.domain}/serietv/?s={showname_clean}'
+            logger.info(f"🔍 [CB01] Searching series: {showname} ({date})")
+            
+            response = await client.get(query, headers=headers, timeout=10)
+            if response.status_code != 200:
+                logger.warning(f"⚠️ [CB01] Failed to fetch search: {response.status_code}")
+                return None
+
+            soup = BeautifulSoup(response.text, 'lxml', parse_only=SoupStrainer('div', class_='card-content'))
+            cards = soup.find_all('div', class_='card-content')
+            
+            year_pattern = re.compile(r'(19|20)\d{2}')
+            for card in cards:
+                try:
+                    link_tag = card.find('h3', class_='card-title').find('a')
+                    if not link_tag:
+                        continue
+                    href = link_tag.get('href')
+                    date_span = card.find('span', style=re.compile('color'))
+                    
+                    if date_span:
+                        date_text = date_span.text
+                        match = year_pattern.search(date_text)
+                        if match:
+                            year = match.group(0)
+                            if abs(int(year) - int(date)) <= 1:
+                                logger.info(f"✅ [CB01] Found series: {href}")
+                                return href
+                except Exception as e:
+                    logger.debug(f"⚠️ [CB01] Error parsing card: {e}")
+                    continue
+            
+            logger.warning(f"⚠️ [CB01] No series found for: {showname} ({date})")
+            return None
+
+        except Exception as e:
+            logger.error(f"❌ [CB01] Search error: {e}")
+            return None
+
+    async def get_streams(self, id: str, client: AsyncSession) -> Dict:
+        """Estrae stream da CB01"""
+        streams = {'streams': []}
+        try:
+            is_series = False
+            season = None
+            episode = None
+            content_id = clean_id(id)
+            
+            if ':' in id:
+                parts = id.split(':')
+                content_id = parts[0]
+                if len(parts) >= 3:
+                    season, episode = parts[1], parts[2]
+                    is_series = True
+
+            tmdb_id = None
+            if content_id.startswith('tt'):
+                tmdb_id = await get_tmdb_id_from_imdb(content_id, client)
+                if not tmdb_id: return streams
+            else:
+                try: tmdb_id = int(content_id)
+                except ValueError: return streams
+
+            media_title = await get_media_title(client, tmdb_id, is_series, season, episode)
+
+            # Get title and year from TMDB
+            title_response = await client.get(
+                f"https://api.themoviedb.org/3/{'tv' if is_series else 'movie'}/{tmdb_id}",
+                params={"api_key": TMDB_API_KEY, "language": "it"},
+                timeout=5
+            )
+            
+            if title_response.status_code != 200:
+                logger.warning(f"⚠️ [CB01] Could not fetch TMDB data")
+                return streams
+            
+            tmdb_data = title_response.json()
+            title = tmdb_data.get('name' if is_series else 'title', '')
+            date = (tmdb_data.get('first_air_date') or tmdb_data.get('release_date') or '').split('-')[0]
+            
+            if not title or not date:
+                logger.warning(f"⚠️ [CB01] Missing title or date")
+                return streams
+
+            # Search on CB01
+            if is_series:
+                link = await self.search_series(title, date, client)
+            else:
+                link = await self.search_movie(title, date, client)
+            
+            if link:
+                # Parse link to get quality estimate (simple heuristic)
+                streams['streams'].append({
+                    "name": "📺 CB01",
+                    "title": media_title,
+                    "url": link,
+                    "behaviorHints": {
+                        "proxyHeaders": {"request": {"user-agent": User_Agent}},
+                        "bingeGroup": "cb01"
+                    }
+                })
+                logger.info(f"✅ [CB01] Stream added for {media_title}")
+
+        except Exception as e:
+            logger.error(f"❌ [CB01] Stream Error: {e}")
+        
         return streams
 
 # ============================================================================
@@ -255,7 +425,9 @@ app.add_middleware(
 limiter = Limiter(key_func=get_remote_address)
 app.state.limiter = limiter
 app.add_middleware(SlowAPIMiddleware)
-extractor = StreamingCommunityExtractor()
+
+vixsrc_extractor = StreamingCommunityExtractor()
+cb01_extractor = CB01Extractor()
 
 def respond_with(data: Any) -> JSONResponse:
     resp = JSONResponse(content=data)
@@ -279,9 +451,9 @@ async def root(request: Request):
 async def manifest():
     config = {
         "id": "org.stremio.mammamia.ufo",
-        "version": "1.3.4",
+        "version": "1.4.0",
         "name": ADDON_NAME,
-        "description": "VixSrc Stream via Vercel",
+        "description": "VixSrc + CB01 Streams via Vercel",
         "logo": ADDON_LOGO,
         "resources": ["stream"],
         "types": ["movie", "series"],
@@ -295,11 +467,27 @@ async def manifest():
 async def streams(request: Request, type: str, id: str):
     try:
         if type not in ["movie", "series"]: raise HTTPException(status_code=404)
+        
         async with AsyncSession() as client:
-            streams_data = await extractor.get_streams(id, client)
-        if not streams_data: streams_data = {"streams": []}
+            # Priorità: VixSrc prima, CB01 come fallback
+            streams_data = await vixsrc_extractor.get_streams(id, client)
+            
+            # Se VixSrc non ha trovato stream, prova CB01
+            if not streams_data.get('streams'):
+                logger.info(f"ℹ️ VixSrc non ha trovato stream, provo CB01...")
+                streams_data = await cb01_extractor.get_streams(id, client)
+            else:
+                # Se VixSrc ha trovato stream, aggiungi CB01 come fallback
+                cb01_streams = await cb01_extractor.get_streams(id, client)
+                if cb01_streams.get('streams'):
+                    streams_data['streams'].extend(cb01_streams['streams'])
+        
+        if not streams_data: 
+            streams_data = {"streams": []}
+        
         return respond_with(streams_data)
-    except Exception:
+    except Exception as e:
+        logger.error(f"❌ Stream endpoint error: {e}")
         return respond_with({"streams": []})
 
 @app.get("/U0MQ/meta/{type}/{id}.json")
