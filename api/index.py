@@ -1,13 +1,13 @@
 import logging
 import os
 import re
-from typing import Dict, Optional, Any, List
-from urllib.parse import urlencode, urlparse, parse_qsl, urlunparse
+import random
+from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urljoin
 
 from bs4 import BeautifulSoup
 from curl_cffi.requests import AsyncSession
 from dotenv import load_dotenv
-from fake_headers import Headers
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -23,17 +23,8 @@ load_dotenv()
 ADDON_NAME = "UFO addon"
 ADDON_LOGO = "https://static.vecteezy.com/system/resources/thumbnails/050/270/611/small/ufo-logo-design-no-background-perfect-for-print-on-demand-t-shirt-design-png.png"
 
-CONFIG = {
-    "Siti": {
-        "StreamingCommunity": {
-            "url": "https://vixsrc.to",
-            "enabled": "1"
-        }
-    }
-}
-
+SOURCE_URL = "https://vidsrc-embed.ru/embed"
 TMDB_API_KEY = os.getenv("TMDB_KEY", "536b1c46da222eb34b69d168f092b495")
-USER_AGENT = "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:127.0) Gecko/20100101 Firefox/127.0"
 IMPERSONATE = "chrome124"
 
 logging.basicConfig(
@@ -42,6 +33,18 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:129.0) Gecko/20100101 Firefox/129.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.6 Safari/605.1.15",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36 Edg/128.0.0.0",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:128.0) Gecko/20100101 Firefox/128.0",
+]
+
+
 # ============================================================================
 # HELPERS
 # ============================================================================
@@ -49,38 +52,78 @@ def clean_id(id_str: str) -> str:
     return id_str.split(":")[0] if ":" in id_str else id_str
 
 
-def build_headers(referer: Optional[str] = None, origin: Optional[str] = None) -> Dict[str, str]:
-    headers = {
-        "User-Agent": USER_AGENT,
-        "Accept": "*/*",
-        "Accept-Language": "it-IT,it;q=0.9,en;q=0.8",
-        "Cache-Control": "no-cache",
-        "Pragma": "no-cache",
+def get_random_user_agent() -> str:
+    return random.choice(USER_AGENTS)
+
+
+def get_sec_ch_ua(user_agent: str) -> str:
+    if "Chrome" in user_agent and "Edg" in user_agent:
+        return '"Chromium";v="128", "Not;A=Brand";v="24", "Microsoft Edge";v="128"'
+    elif "Chrome" in user_agent and "Edg" not in user_agent:
+        return '"Chromium";v="128", "Not;A=Brand";v="24", "Google Chrome";v="128"'
+    return ""
+
+
+def get_sec_ch_ua_platform(user_agent: str) -> str:
+    if "Windows" in user_agent:
+        return '"Windows"'
+    elif "Macintosh" in user_agent or "Mac OS X" in user_agent:
+        return '"macOS"'
+    elif "Linux" in user_agent:
+        return '"Linux"'
+    return '"Windows"'
+
+
+def get_randomized_headers(base_dom: str) -> Dict[str, str]:
+    user_agent = get_random_user_agent()
+    sec_ch_ua = get_sec_ch_ua(user_agent)
+    sec_ch_ua_platform = get_sec_ch_ua_platform(user_agent)
+
+    headers: Dict[str, str] = {
+        "accept": "*/*",
+        "accept-language": "en-US,en;q=0.9",
+        "priority": "u=1",
+        "sec-ch-ua-mobile": "?0",
+        "sec-fetch-dest": "script",
+        "sec-fetch-mode": "no-cors",
+        "sec-fetch-site": "same-origin",
+        "Referer": f"{base_dom}/",
+        "Referrer-Policy": "origin",
+        "User-Agent": user_agent,
     }
-    if referer:
-        headers["Referer"] = referer
-    if origin:
-        headers["Origin"] = origin
+
+    if sec_ch_ua:
+        headers["sec-ch-ua"] = sec_ch_ua
+        headers["sec-ch-ua-platform"] = sec_ch_ua_platform
+
     return headers
 
 
-def ensure_m3u8_and_params(url: str, token: Optional[str], expires: Optional[str], add_h: bool = False) -> str:
-    parsed = urlparse(url)
-    query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+def parse_stremio_id(stremio_id: str) -> Tuple[str, Optional[str], Optional[str]]:
+    if stremio_id.startswith("tmdb:"):
+        parts = stremio_id.split(":")
+        if len(parts) >= 2:
+            content_id = parts[1]
+            season = parts[2] if len(parts) > 2 else None
+            episode = parts[3] if len(parts) > 3 else None
+            return content_id, season, episode
 
-    if token:
-        query["token"] = token
-    if expires:
-        query["expires"] = expires
-    if add_h and "h" not in query:
-        query["h"] = "1"
+    parts = stremio_id.split(":")
+    content_id = parts[0]
+    season = parts[1] if len(parts) > 1 else None
+    episode = parts[2] if len(parts) > 2 else None
+    return content_id, season, episode
 
-    path = parsed.path
-    if not path.endswith(".m3u8"):
-        path = f"{path}.m3u8"
 
-    new_parsed = parsed._replace(path=path, query=urlencode(query))
-    return urlunparse(new_parsed)
+def build_embed_url(stremio_id: str, content_type: str) -> str:
+    content_id, season, episode = parse_stremio_id(stremio_id)
+
+    if content_type == "movie":
+        return f"{SOURCE_URL}/movie/{content_id}"
+
+    season = season or "1"
+    episode = episode or "1"
+    return f"{SOURCE_URL}/tv/{content_id}/{season}-{episode}"
 
 
 async def get_tmdb_id_from_imdb(imdb_id: str, client: AsyncSession) -> Optional[int]:
@@ -96,7 +139,6 @@ async def get_tmdb_id_from_imdb(imdb_id: str, client: AsyncSession) -> Optional[
             impersonate=IMPERSONATE
         )
         if response.status_code != 200:
-            logger.warning(f"TMDB find failed: {response.status_code}")
             return None
 
         data = response.json()
@@ -105,251 +147,310 @@ async def get_tmdb_id_from_imdb(imdb_id: str, client: AsyncSession) -> Optional[
         if data.get("tv_results"):
             return data["tv_results"][0].get("id")
         return None
-
     except Exception as e:
-        logger.error(f"Errore conversione IMDb -> TMDB: {e}")
+        logger.error(f"TMDB conversion error: {e}")
         return None
 
 
 async def get_media_title(
     client: AsyncSession,
-    tmdb_id: int,
-    is_series: bool,
-    season: Optional[str] = None,
-    episode: Optional[str] = None
+    stremio_id: str,
+    content_type: str
 ) -> str:
     try:
+        content_id, season, episode = parse_stremio_id(stremio_id)
+
+        if content_id.startswith("tt"):
+            tmdb_id = await get_tmdb_id_from_imdb(content_id, client)
+        else:
+            tmdb_id = int(content_id)
+
         params = {"api_key": TMDB_API_KEY, "language": "it-IT"}
 
-        if not is_series:
-            response = await client.get(
+        if content_type == "movie":
+            r = await client.get(
                 f"https://api.themoviedb.org/3/movie/{tmdb_id}",
                 params=params,
                 timeout=10,
                 impersonate=IMPERSONATE
             )
-            if response.status_code == 200:
-                data = response.json()
-                return data.get("title", f"Film {tmdb_id}")
-            return f"Film {tmdb_id}"
+            if r.status_code == 200:
+                return r.json().get("title", "Film")
+            return "Film"
 
-        response = await client.get(
+        r = await client.get(
             f"https://api.themoviedb.org/3/tv/{tmdb_id}/season/{season}/episode/{episode}",
             params=params,
             timeout=10,
             impersonate=IMPERSONATE
         )
-        if response.status_code == 200:
-            data = response.json()
-            return data.get("name", f"Episodio {episode}")
+        if r.status_code == 200:
+            return r.json().get("name", f"Episodio {episode}")
         return f"Episodio {episode}"
 
     except Exception as e:
-        logger.error(f"Errore recupero titolo TMDB: {e}")
-        return f"Episodio {episode}" if is_series else f"Film {tmdb_id}"
+        logger.error(f"Title error: {e}")
+        return "Unknown"
+
+
+# ============================================================================
+# HLS PARSER
+# ============================================================================
+def parse_hls_master(master_playlist_content: str, base_url: str) -> List[Dict[str, Any]]:
+    qualities: List[Dict[str, Any]] = []
+    lines = master_playlist_content.splitlines()
+
+    for i, line in enumerate(lines):
+        if "#EXT-X-STREAM-INF:" not in line:
+            continue
+
+        attrs_part = line.split(":", 1)[1] if ":" in line else ""
+        bandwidth = 0
+        resolution = None
+        frame_rate = None
+        codecs = None
+
+        bw_match = re.search(r'BANDWIDTH=(\d+)', attrs_part)
+        if bw_match:
+            bandwidth = int(bw_match.group(1))
+
+        res_match = re.search(r'RESOLUTION=(\d+)x(\d+)', attrs_part)
+        if res_match:
+            resolution = f"{res_match.group(1)}x{res_match.group(2)}"
+            height = int(res_match.group(2))
+        else:
+            height = 0
+
+        fr_match = re.search(r'FRAME-RATE=([\d.]+)', attrs_part)
+        if fr_match:
+            try:
+                frame_rate = float(fr_match.group(1))
+            except Exception:
+                frame_rate = None
+
+        codecs_match = re.search(r'CODECS="([^"]+)"', attrs_part)
+        if codecs_match:
+            codecs = codecs_match.group(1)
+
+        playlist_uri = None
+        for j in range(i + 1, min(i + 4, len(lines))):
+            if lines[j].strip() and not lines[j].startswith("#"):
+                playlist_uri = lines[j].strip()
+                break
+
+        if not playlist_uri:
+            continue
+
+        playlist_url = playlist_uri if playlist_uri.startswith("http") else urljoin(base_url, playlist_uri)
+
+        if height >= 1080:
+            title = f"{resolution} (1080p)"
+        elif height >= 720:
+            title = f"{resolution} (720p)"
+        elif height >= 480:
+            title = f"{resolution} (480p)"
+        elif height >= 360:
+            title = f"{resolution} (360p)"
+        elif resolution:
+            title = resolution
+        elif bandwidth > 5000000:
+            title = "High Quality"
+        elif bandwidth > 2000000:
+            title = "Medium Quality"
+        else:
+            title = "Low Quality"
+
+        qualities.append({
+            "resolution": resolution,
+            "bandwidth": bandwidth,
+            "codecs": codecs,
+            "frame_rate": frame_rate,
+            "url": playlist_url,
+            "title": title
+        })
+
+    qualities.sort(key=lambda x: x.get("bandwidth", 0), reverse=True)
+    return qualities
+
+
+async def fetch_and_parse_hls(url: str, client: AsyncSession) -> Optional[Dict[str, Any]]:
+    try:
+        r = await client.get(url, timeout=15, impersonate=IMPERSONATE)
+        if r.status_code != 200:
+            return None
+
+        content = r.text
+        if "#EXT-X-STREAM-INF" not in content:
+            return None
+
+        return {
+            "masterUrl": url,
+            "qualities": parse_hls_master(content, url)
+        }
+    except Exception as e:
+        logger.warning(f"HLS parse failed: {e}")
+        return None
 
 
 # ============================================================================
 # EXTRACTOR
 # ============================================================================
-class StreamingCommunityExtractor:
+class StremsrcStyleExtractor:
     def __init__(self):
-        self.domain = CONFIG["Siti"]["StreamingCommunity"]["url"].rstrip("/")
-        self.random_headers = Headers()
+        self.base_dom = "https://cloudnestra.com"
 
-    def _extract_player_data(self, html: str) -> Optional[Dict[str, str]]:
+    async def servers_load(self, html: str) -> Tuple[List[Dict[str, Optional[str]]], str]:
         soup = BeautifulSoup(html, "lxml")
-        scripts = soup.find_all("script")
+        servers: List[Dict[str, Optional[str]]] = []
+        title = soup.title.text.strip() if soup.title else ""
 
-        joined_scripts = "\n".join(
-            script.get_text("\n", strip=False) for script in scripts if script.get_text(strip=False)
-        )
+        iframe = soup.find("iframe")
+        base = iframe.get("src") if iframe else None
+        if base:
+            if base.startswith("//"):
+                base = "https:" + base
+            try:
+                self.base_dom = f"{re.match(r'^https?://[^/]+', base).group(0)}"
+            except Exception:
+                pass
 
-        # Pattern classico
-        token_match = re.search(r"'token'\s*:\s*'([^']+)'", joined_scripts)
-        expires_match = re.search(r"'expires'\s*:\s*'([^']+)'", joined_scripts)
-        url_match = re.search(r"url\s*:\s*'([^']+)'", joined_scripts)
+        for server in soup.select(".serversList .server"):
+            servers.append({
+                "name": server.get_text(strip=True),
+                "dataHash": server.get("data-hash")
+            })
 
-        if token_match and expires_match and url_match:
-            return {
-                "token": token_match.group(1),
-                "expires": expires_match.group(1),
-                "url": url_match.group(1),
-                "raw": joined_scripts
-            }
+        return servers, title
 
-        # Fallback: cerca qualunque m3u8 diretta
-        m3u8_match = re.search(r'(https?://[^\s\'"]+\.m3u8[^\s\'"]*)', joined_scripts)
-        if m3u8_match:
-            return {
-                "token": "",
-                "expires": "",
-                "url": m3u8_match.group(1),
-                "raw": joined_scripts
-            }
+    async def rcp_grabber(self, html: str) -> Optional[str]:
+        match = re.search(r"src:\s*'([^']*)'", html)
+        return match.group(1) if match else None
 
-        return None
-
-    async def _detect_quality(self, m3u8_url: str, headers: Dict[str, str], client: AsyncSession) -> Dict[str, Any]:
-        detected_quality = "Auto"
-        max_height = 0
-
+    async def prorcp_handler(self, prorcp: str, client: AsyncSession) -> Optional[str]:
         try:
-            res = await client.get(
-                m3u8_url,
-                headers=headers,
-                timeout=10,
+            r = await client.get(
+                f"{self.base_dom}/prorcp/{prorcp}",
+                headers=get_randomized_headers(self.base_dom),
+                timeout=20,
                 impersonate=IMPERSONATE
             )
+            if r.status_code != 200:
+                return None
 
-            logger.info(f"M3U8 metadata status: {res.status_code}")
-
-            if res.status_code == 200:
-                lines = res.text.splitlines()
-                for line in lines:
-                    if "RESOLUTION=" in line:
-                        match = re.search(r"RESOLUTION=(\d+)x(\d+)", line)
-                        if match:
-                            height = int(match.group(2))
-                            max_height = max(max_height, height)
-
-                if max_height > 0:
-                    detected_quality = f"{max_height}p"
-                else:
-                    detected_quality = "HLS"
-
+            match = re.search(r"file:\s*'([^']*)'", r.text)
+            return match.group(1) if match else None
         except Exception as e:
-            logger.warning(f"Impossibile analizzare metadata m3u8: {e}")
+            logger.warning(f"prorcp handler failed: {e}")
+            return None
 
-        return {
-            "quality": detected_quality,
-            "height": max_height
-        }
+    async def get_streams(self, stremio_id: str, content_type: str, client: AsyncSession) -> Dict[str, Any]:
+        streams: List[Dict[str, Any]] = []
 
-    async def extract_vixcloud_url(self, link: str, client: AsyncSession) -> List[Dict[str, Any]]:
         try:
-            page_headers = build_headers(
-                referer=f"{self.domain}/",
-                origin=self.domain
-            )
+            embed_url = build_embed_url(stremio_id, content_type)
+            media_title = await get_media_title(client, stremio_id, content_type)
 
-            logger.info(f"Fetching page: {link}")
-
-            response = await client.get(
-                link,
-                headers=page_headers,
+            embed = await client.get(
+                embed_url,
+                headers=get_randomized_headers(self.base_dom),
                 timeout=20,
                 impersonate=IMPERSONATE
             )
 
-            logger.info(f"Page status: {response.status_code}")
+            if embed.status_code != 200:
+                logger.warning(f"Embed failed: {embed.status_code}")
+                return {"streams": []}
 
-            if response.status_code != 200:
-                return []
+            servers, _ = await self.servers_load(embed.text)
+            if not servers:
+                logger.warning("No servers found")
+                return {"streams": []}
 
-            player_data = self._extract_player_data(response.text)
-            if not player_data:
-                logger.warning("Nessun dato player trovato nella pagina")
-                return []
+            rcp_results: List[str] = []
+            for server in servers:
+                data_hash = server.get("dataHash")
+                if not data_hash:
+                    continue
 
-            raw_script = player_data.get("raw", "")
-            server_url = player_data["url"]
-            token = player_data.get("token")
-            expires = player_data.get("expires")
+                try:
+                    headers = get_randomized_headers(self.base_dom)
+                    headers["Sec-Fetch-Dest"] = ""
 
-            final_url = server_url
-            if ".m3u8" not in server_url or token or expires:
-                final_url = ensure_m3u8_and_params(
-                    server_url,
-                    token=token,
-                    expires=expires,
-                    add_h=("window.canPlayFHD = true" in raw_script)
-                )
+                    r = await client.get(
+                        f"{self.base_dom}/rcp/{data_hash}",
+                        headers=headers,
+                        timeout=20,
+                        impersonate=IMPERSONATE
+                    )
+                    if r.status_code == 200:
+                        rcp_results.append(r.text)
+                except Exception as e:
+                    logger.warning(f"RCP fetch failed: {e}")
 
-            hls_headers = build_headers(
-                referer=f"{self.domain}/",
-                origin=self.domain
-            )
+            api_responses = []
+            for html in rcp_results:
+                rcp_data = await self.rcp_grabber(html)
+                if not rcp_data:
+                    continue
 
-            quality_info = await self._detect_quality(final_url, hls_headers, client)
+                if rcp_data.startswith("/prorcp/"):
+                    stream_url = await self.prorcp_handler(rcp_data.replace("/prorcp/", ""), client)
+                    if not stream_url:
+                        continue
 
-            if quality_info["height"] == 0 and "window.canPlayFHD = true" in raw_script:
-                quality_info["quality"] = "1080p"
-            elif quality_info["height"] == 0 and quality_info["quality"] == "Auto":
-                quality_info["quality"] = "720p"
+                    hls_data = await fetch_and_parse_hls(stream_url, client)
 
-            logger.info(f"Final URL: {final_url}")
-            logger.info(f"Detected quality: {quality_info['quality']}")
+                    api_responses.append({
+                        "name": media_title,
+                        "stream": stream_url,
+                        "referer": self.base_dom,
+                        "hlsData": hls_data
+                    })
 
-            return [{
-                "quality": quality_info["quality"],
-                "url": final_url,
-                "height": quality_info["height"]
-            }]
+            for st in api_responses:
+                if not st.get("stream"):
+                    continue
+
+                behavior_hints = {
+                    "proxyHeaders": {
+                        "request": {
+                            "Sec-Fetch-Dest": "iframe",
+                            "Referer": f"{self.base_dom}/",
+                            "User-Agent": get_random_user_agent()
+                        }
+                    },
+                    "notWebReady": True,
+                    "bingeGroup": "stremsrc"
+                }
+
+                hls_data = st.get("hlsData")
+                if hls_data and hls_data.get("qualities"):
+                    streams.append({
+                        "name": "🛸 Auto",
+                        "title": f"{st['name']} - VidSRC/Cloudnestra Auto",
+                        "url": st["stream"],
+                        "behaviorHints": behavior_hints
+                    })
+
+                    for quality in hls_data["qualities"]:
+                        streams.append({
+                            "name": f"🛸 {quality['title']}",
+                            "title": f"{st['name']} - VidSRC/Cloudnestra {quality['title']}",
+                            "url": quality["url"],
+                            "behaviorHints": behavior_hints
+                        })
+                else:
+                    streams.append({
+                        "name": "🛸 Stream",
+                        "title": f"{st['name']} - VidSRC/Cloudnestra",
+                        "url": st["stream"],
+                        "behaviorHints": behavior_hints
+                    })
 
         except Exception as e:
             logger.error(f"Extractor error: {e}")
-            return []
 
-    async def get_streams(self, id: str, client: AsyncSession) -> Dict[str, List[Dict[str, Any]]]:
-        streams = {"streams": []}
-
-        try:
-            is_series = False
-            season = None
-            episode = None
-            content_id = clean_id(id)
-
-            if ":" in id:
-                parts = id.split(":")
-                content_id = parts[0]
-                if len(parts) >= 3:
-                    season, episode = parts[1], parts[2]
-                    is_series = True
-
-            if content_id.startswith("tt"):
-                tmdb_id = await get_tmdb_id_from_imdb(content_id, client)
-                if not tmdb_id:
-                    return streams
-            else:
-                try:
-                    tmdb_id = int(content_id)
-                except ValueError:
-                    return streams
-
-            media_title = await get_media_title(client, tmdb_id, is_series, season, episode)
-
-            source_url = (
-                f"{self.domain}/tv/{tmdb_id}/{season}/{episode}/"
-                if is_series else
-                f"{self.domain}/movie/{tmdb_id}/"
-            )
-
-            results = await self.extract_vixcloud_url(source_url, client)
-
-            for res in results:
-                streams["streams"].append({
-                    "name": f"🛸 {res['quality']}",
-                    "title": media_title,
-                    "url": res["url"],
-                    "behaviorHints": {
-                        "notWebReady": True,
-                        "bingeGroup": "streamingcommunity",
-                        "proxyHeaders": {
-                            "request": {
-                                "User-Agent": USER_AGENT,
-                                "Referer": f"{self.domain}/",
-                                "Origin": self.domain,
-                                "Accept": "*/*"
-                            }
-                        }
-                    }
-                })
-
-        except Exception as e:
-            logger.error(f"Stream error: {e}")
-
-        return streams
+        return {"streams": streams}
 
 
 # ============================================================================
@@ -369,14 +470,14 @@ limiter = Limiter(key_func=get_remote_address)
 app.state.limiter = limiter
 app.add_middleware(SlowAPIMiddleware)
 
-extractor = StreamingCommunityExtractor()
+extractor = StremsrcStyleExtractor()
 
 
 def respond_with(data: Any) -> JSONResponse:
-    response = JSONResponse(content=data)
-    response.headers["Access-Control-Allow-Origin"] = "*"
-    response.headers["Access-Control-Allow-Headers"] = "*"
-    return response
+    resp = JSONResponse(content=data)
+    resp.headers["Access-Control-Allow-Origin"] = "*"
+    resp.headers["Access-Control-Allow-Headers"] = "*"
+    return resp
 
 
 @app.get("/")
@@ -393,16 +494,15 @@ async def root(request: Request):
 async def manifest():
     return respond_with({
         "id": "org.stremio.mammamia.ufo",
-        "version": "1.4.0",
+        "version": "1.5.0",
         "name": ADDON_NAME,
-        "description": "VixSrc Stream via FastAPI",
+        "description": "VidSRC-style Stream via FastAPI",
         "logo": ADDON_LOGO,
-        "resources": ["stream", "meta", "catalog"],
+        "resources": ["stream"],
         "types": ["movie", "series"],
         "catalogs": [],
-        "behaviorHints": {
-            "configurable": False
-        }
+        "idPrefixes": ["tt", "tmdb"],
+        "behaviorHints": {"configurable": False}
     })
 
 
@@ -413,16 +513,10 @@ async def streams(request: Request, type: str, id: str):
         if type not in ["movie", "series"]:
             raise HTTPException(status_code=404)
 
-        async with AsyncSession(
-            impersonate=IMPERSONATE,
-            timeout=20
-        ) as client:
-            data = await extractor.get_streams(id, client)
+        async with AsyncSession(impersonate=IMPERSONATE, timeout=25) as client:
+            data = await extractor.get_streams(id, type, client)
 
-        if not data:
-            data = {"streams": []}
-
-        return respond_with(data)
+        return respond_with(data or {"streams": []})
 
     except Exception as e:
         logger.error(f"Endpoint stream error: {e}")
