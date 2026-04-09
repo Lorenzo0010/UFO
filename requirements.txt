@@ -1,5 +1,5 @@
 fastapi
-uvicorn
+uvicorn[standard]
 curl_cffi
 fake-headers
 beautifulsoup4
