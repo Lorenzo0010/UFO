@@ -34,6 +34,9 @@ PROXY_HEADERS = {
     "Origin": VIXSRC_DOMAIN,
 }
 
+# Estensioni segmenti video/audio binari da NON proxare
+SEGMENT_EXTENSIONS = (".ts", ".m4s", ".mp4", ".aac", ".mp3", ".vtt", ".webvtt", ".srt")
+
 
 def clean_id(id_str: str) -> str:
     return id_str.split(":")[0] if ":" in id_str else id_str
@@ -48,7 +51,7 @@ def respond_with(data: Any) -> JSONResponse:
 
 
 def proxy_url(base_request_url: str, target_url: str) -> str:
-    """Wrappa un URL VixSrc nel proxy locale."""
+    """Wrappa un URL nel proxy locale."""
     encoded = quote(target_url, safe="")
     return f"{base_request_url}U0MQ/proxy/hls?url={encoded}"
 
@@ -60,12 +63,20 @@ def resolve_url(url: str, base: str) -> str:
     return urljoin(base, url)
 
 
+def is_segment_url(url: str) -> bool:
+    """Restituisce True se l'URL e' un segmento binario (non deve essere proxato)."""
+    # Rimuove query string per controllare l'estensione
+    path = url.split("?")[0].lower()
+    return path.endswith(SEGMENT_EXTENSIONS)
+
+
 def rewrite_m3u8(content: str, manifest_url: str, proxy_base: str) -> str:
     """
-    Riscrive un manifest M3U8 sostituendo tutti gli URL con versioni proxate:
-    - righe segmento (.ts, .m4s, .mp4, .aac, ecc.)
-    - URI= nei tag #EXT-X-KEY, #EXT-X-MAP, #EXT-X-MEDIA, ecc.
-    - eventuali sub-playlist .m3u8
+    Riscrive un manifest M3U8:
+    - Sub-playlist .m3u8 -> proxate (il proxy le riscrivera a sua volta)
+    - URI= in tag (#EXT-X-KEY, #EXT-X-MAP, #EXT-X-MEDIA con .m3u8) -> proxati
+    - Segmenti video/audio (.ts, .m4s, ecc.) -> URL DIRETTO, non proxato
+      (Vercel non puo' scaricare file binari pesanti in una Serverless Function)
     """
     lines = content.splitlines()
     out = []
@@ -73,18 +84,25 @@ def rewrite_m3u8(content: str, manifest_url: str, proxy_base: str) -> str:
     for line in lines:
         stripped = line.strip()
 
-        # Righe di tag con URI=
+        # Tag con URI= (es. #EXT-X-KEY, #EXT-X-MAP, #EXT-X-MEDIA)
         if stripped.startswith("#") and 'URI="' in stripped:
             def replace_uri(m):
                 inner = m.group(1)
                 resolved = resolve_url(inner, manifest_url)
-                return f'URI="{proxy_url(proxy_base, resolved)}"'
+                # Proxiamo solo se e' una sub-playlist o una chiave di cifratura
+                # I sottotitoli/audio .m3u8 devono passare per il proxy per essere riscritti
+                if is_segment_url(resolved):
+                    return f'URI="{resolved}"'  # diretto
+                return f'URI="{proxy_url(proxy_base, resolved)}"'  # proxy
             line = re.sub(r'URI="([^"]+)"', replace_uri, stripped)
 
-        # Righe URI (segmenti o sub-playlist), non commenti
+        # Righe di contenuto (non commenti): sub-playlist o segmenti
         elif stripped and not stripped.startswith("#"):
             resolved = resolve_url(stripped, manifest_url)
-            line = proxy_url(proxy_base, resolved)
+            if is_segment_url(resolved):
+                line = resolved  # segmento diretto
+            else:
+                line = proxy_url(proxy_base, resolved)  # sub-playlist proxata
 
         out.append(line)
 
@@ -108,7 +126,7 @@ async def get_tmdb_id_from_imdb(imdb_id: str, client: AsyncSession) -> Optional[
             return data["tv_results"][0].get("id")
         return None
     except Exception as e:
-        logger.error(f"❌ TMDB error: {e}")
+        logger.error(f"\u274c TMDB error: {e}")
         return None
 
 
@@ -169,10 +187,10 @@ class StreamingCommunityExtractor:
                 logger.warning(f"masterPlaylist not found: {page_url}")
                 return None
             url = self.build_playlist_url(parsed)
-            logger.info(f"🎯 Playlist URL: {url}")
+            logger.info(f"\U0001f3af Playlist URL: {url}")
             return url
         except Exception as e:
-            logger.error(f"❌ extract_playlist_url: {e}")
+            logger.error(f"\u274c extract_playlist_url: {e}")
             return None
 
     async def get_streams(
@@ -213,10 +231,10 @@ class StreamingCommunityExtractor:
                 return streams
 
             proxied_url = proxy_url(base_url + "/", playlist_url)
-            logger.info(f"✅ Proxied URL: {proxied_url}")
+            logger.info(f"\u2705 Proxied URL: {proxied_url}")
 
             streams["streams"].append({
-                "name": "🛸 UFO",
+                "name": "\U0001f6f8 UFO",
                 "description": self.domain,
                 "title": "VixSrc via UFO proxy",
                 "url": proxied_url,
@@ -227,7 +245,7 @@ class StreamingCommunityExtractor:
                 }
             })
         except Exception as e:
-            logger.error(f"❌ get_streams: {e}")
+            logger.error(f"\u274c get_streams: {e}")
         return streams
 
 
@@ -262,7 +280,7 @@ async def root(request: Request):
 async def manifest():
     return respond_with({
         "id": "org.stremio.mammamia.ufo",
-        "version": "2.1.0",
+        "version": "2.2.0",
         "name": ADDON_NAME,
         "description": "VixSrc Stream via Vercel",
         "logo": ADDON_LOGO,
@@ -284,50 +302,49 @@ async def streams(request: Request, type: str, id: str):
             data = await extractor.get_streams(id, type, client, base_url)
         return respond_with(data or {"streams": []})
     except Exception as e:
-        logger.error(f"❌ /stream: {e}")
+        logger.error(f"\u274c /stream: {e}")
         return respond_with({"streams": []})
 
 
 # ============================================================================
-# HLS PROXY
+# HLS PROXY - solo manifest, i segmenti vanno diretti a VixSrc
 # ============================================================================
 @app.get("/U0MQ/proxy/hls")
 async def hls_proxy(request: Request, url: str):
     if not url.startswith("https://"):
         raise HTTPException(status_code=400, detail="Invalid URL")
 
-    proxy_base = str(request.base_url)  # es. https://ufo-pearl-theta.vercel.app/
+    proxy_base = str(request.base_url)
 
     try:
         async with AsyncSession() as client:
             response = await client.get(
                 url,
                 headers=PROXY_HEADERS,
-                timeout=25,
+                timeout=20,
                 allow_redirects=True,
                 impersonate=IMPERSONATE,
             )
 
-        actual_url = str(response.url)  # URL finale dopo redirect
+        actual_url = str(response.url)
         content_type = response.headers.get("content-type", "application/octet-stream").lower()
         body_bytes = response.content
 
         logger.info(
-            f"🛠 proxy: status={response.status_code} CT={content_type} "
+            f"\U0001f6e0 proxy: status={response.status_code} CT={content_type} "
             f"len={len(body_bytes)} url={actual_url[:80]}"
         )
 
-        # Determina se è un manifest M3U8
         is_m3u8 = (
             b"#EXTM3U" in body_bytes[:32]
             or "mpegurl" in content_type
-            or actual_url.endswith(".m3u8")
+            or actual_url.split("?")[0].endswith(".m3u8")
         )
 
         if is_m3u8:
             text = body_bytes.decode("utf-8", errors="replace")
-            logger.info(f"📜 Raw M3U8 first 300 chars:\n{text[:300]}")
             rewritten = rewrite_m3u8(text, actual_url, proxy_base)
+            logger.info(f"\U0001f4fa M3U8 proxied and rewritten ({len(text)} -> {len(rewritten)} chars)")
             return Response(
                 content=rewritten.encode("utf-8"),
                 status_code=200,
@@ -335,7 +352,8 @@ async def hls_proxy(request: Request, url: str):
                 headers={"Access-Control-Allow-Origin": "*", "Cache-Control": "no-cache"},
             )
 
-        # Segmenti binari (.ts, .mp4, chiavi, ecc.) - pass-through
+        # Non dovrebbe mai arrivare qui per segmenti (sono diretti),
+        # ma gestisce chiavi di cifratura o altri binari piccoli
         return Response(
             content=body_bytes,
             status_code=response.status_code,
@@ -344,7 +362,7 @@ async def hls_proxy(request: Request, url: str):
         )
 
     except Exception as e:
-        logger.error(f"❌ HLS proxy error [{url[:60]}]: {e}")
+        logger.error(f"\u274c HLS proxy error [{url[:60]}]: {e}")
         raise HTTPException(status_code=502, detail=str(e))
 
 
@@ -368,10 +386,6 @@ async def debug_stream(request: Request, tmdb_id: str):
 
 @app.get("/U0MQ/debug/proxy-raw/{tmdb_id}")
 async def debug_proxy_raw(request: Request, tmdb_id: str):
-    """
-    Chiama direttamente il playlist URL e mostra il body grezzo.
-    Utile per capire cosa restituisce VixSrc prima della riscrittura.
-    """
     try:
         async with AsyncSession() as client:
             ext = StreamingCommunityExtractor()
