@@ -2,7 +2,7 @@ import logging
 import os
 import re
 from typing import Any, Dict, Optional
-from urllib.parse import quote
+from urllib.parse import quote, urljoin
 
 from bs4 import BeautifulSoup
 from curl_cffi.requests import AsyncSession
@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 from fake_headers import Headers
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse
 from slowapi import Limiter
 from slowapi.middleware import SlowAPIMiddleware
 from slowapi.util import get_remote_address
@@ -47,6 +47,50 @@ def respond_with(data: Any) -> JSONResponse:
     return resp
 
 
+def proxy_url(base_request_url: str, target_url: str) -> str:
+    """Wrappa un URL VixSrc nel proxy locale."""
+    encoded = quote(target_url, safe="")
+    return f"{base_request_url}U0MQ/proxy/hls?url={encoded}"
+
+
+def resolve_url(url: str, base: str) -> str:
+    """Risolve URL relativi rispetto al base URL del manifest."""
+    if url.startswith("http"):
+        return url
+    return urljoin(base, url)
+
+
+def rewrite_m3u8(content: str, manifest_url: str, proxy_base: str) -> str:
+    """
+    Riscrive un manifest M3U8 sostituendo tutti gli URL con versioni proxate:
+    - righe segmento (.ts, .m4s, .mp4, .aac, ecc.)
+    - URI= nei tag #EXT-X-KEY, #EXT-X-MAP, #EXT-X-MEDIA, ecc.
+    - eventuali sub-playlist .m3u8
+    """
+    lines = content.splitlines()
+    out = []
+
+    for line in lines:
+        stripped = line.strip()
+
+        # Righe di tag con URI=
+        if stripped.startswith("#") and 'URI="' in stripped:
+            def replace_uri(m):
+                inner = m.group(1)
+                resolved = resolve_url(inner, manifest_url)
+                return f'URI="{proxy_url(proxy_base, resolved)}"'
+            line = re.sub(r'URI="([^"]+)"', replace_uri, stripped)
+
+        # Righe URI (segmenti o sub-playlist), non commenti
+        elif stripped and not stripped.startswith("#"):
+            resolved = resolve_url(stripped, manifest_url)
+            line = proxy_url(proxy_base, resolved)
+
+        out.append(line)
+
+    return "\n".join(out)
+
+
 async def get_tmdb_id_from_imdb(imdb_id: str, client: AsyncSession) -> Optional[int]:
     try:
         response = await client.get(
@@ -74,11 +118,11 @@ class StreamingCommunityExtractor:
         self.random_headers = Headers()
 
     def build_headers(self, referer: Optional[str] = None) -> Dict[str, str]:
-        headers = self.random_headers.generate()
-        headers["User-Agent"] = USER_AGENT
-        headers["Referer"] = referer or f"{self.domain}/"
-        headers["Origin"] = self.domain
-        return headers
+        h = self.random_headers.generate()
+        h["User-Agent"] = USER_AGENT
+        h["Referer"] = referer or f"{self.domain}/"
+        h["Origin"] = self.domain
+        return h
 
     def parse_stream_data(self, html: str) -> Optional[Dict[str, str]]:
         soup = BeautifulSoup(html, "lxml")
@@ -86,17 +130,14 @@ class StreamingCommunityExtractor:
             content = script.string or script.text or ""
             if "masterPlaylist" not in content:
                 continue
-
             token_match = re.search(r"['\"]token['\"]\s*:\s*['\"]([^'\"]+)['\"]", content)
             expires_match = re.search(r"['\"]expires['\"]\s*:\s*['\"](\d+)['\"]", content)
             url_match = re.search(
                 r"masterPlaylist\s*=\s*\{[^}]*url\s*:\s*['\"]([^'\"]+)['\"]",
-                content,
-                re.DOTALL,
+                content, re.DOTALL
             )
             if not url_match:
                 url_match = re.search(r"url\s*:\s*['\"]([^'\"]+)['\"]", content)
-
             if token_match and expires_match and url_match:
                 return {
                     "token": token_match.group(1),
@@ -115,32 +156,28 @@ class StreamingCommunityExtractor:
         return url
 
     async def extract_playlist_url(self, page_url: str, client: AsyncSession) -> Optional[str]:
-        """Estrae l'URL del playlist (non ancora proxato) dalla pagina VixSrc."""
         try:
             response = await client.get(
-                page_url,
-                headers=self.build_headers(),
-                timeout=20,
-                impersonate=IMPERSONATE,
+                page_url, headers=self.build_headers(),
+                timeout=20, impersonate=IMPERSONATE,
             )
             if response.status_code != 200:
-                logger.warning(f"Page fetch failed {response.status_code}: {page_url}")
+                logger.warning(f"Page {page_url} -> {response.status_code}")
                 return None
-
             parsed = self.parse_stream_data(response.text)
             if not parsed:
-                logger.warning(f"masterPlaylist not found in: {page_url}")
+                logger.warning(f"masterPlaylist not found: {page_url}")
                 return None
-
-            playlist_url = self.build_playlist_url(parsed)
-            logger.info(f"🎯 Playlist URL: {playlist_url}")
-            return playlist_url
-
+            url = self.build_playlist_url(parsed)
+            logger.info(f"🎯 Playlist URL: {url}")
+            return url
         except Exception as e:
-            logger.error(f"❌ extract_playlist_url error: {e}")
+            logger.error(f"❌ extract_playlist_url: {e}")
             return None
 
-    async def get_streams(self, id: str, content_type: str, client: AsyncSession, base_url: str) -> Dict[str, list]:
+    async def get_streams(
+        self, id: str, content_type: str, client: AsyncSession, base_url: str
+    ) -> Dict[str, list]:
         streams = {"streams": []}
         try:
             content_id = clean_id(id)
@@ -175,12 +212,8 @@ class StreamingCommunityExtractor:
             if not playlist_url:
                 return streams
 
-            # Invece di dare a Stremio l'URL diretto di VixSrc (che richiederebbe
-            # header specifici), passiamo attraverso il nostro proxy /U0MQ/proxy/hls
-            encoded = quote(playlist_url, safe="")
-            proxied_url = f"{base_url}/U0MQ/proxy/hls?url={encoded}"
-
-            logger.info(f"✅ Proxied stream URL: {proxied_url}")
+            proxied_url = proxy_url(base_url + "/", playlist_url)
+            logger.info(f"✅ Proxied URL: {proxied_url}")
 
             streams["streams"].append({
                 "name": "🛸 UFO",
@@ -194,7 +227,7 @@ class StreamingCommunityExtractor:
                 }
             })
         except Exception as e:
-            logger.error(f"❌ get_streams error: {e}")
+            logger.error(f"❌ get_streams: {e}")
         return streams
 
 
@@ -221,18 +254,15 @@ extractor = StreamingCommunityExtractor()
 @app.get("/")
 async def root(request: Request):
     base_url = str(request.base_url).rstrip("/")
-    return respond_with({
-        "status": "online",
-        "addon": ADDON_NAME,
-        "manifest": f"{base_url}/U0MQ/manifest.json"
-    })
+    return respond_with({"status": "online", "addon": ADDON_NAME,
+                         "manifest": f"{base_url}/U0MQ/manifest.json"})
 
 
 @app.get("/U0MQ/manifest.json")
 async def manifest():
     return respond_with({
         "id": "org.stremio.mammamia.ufo",
-        "version": "2.0.0",
+        "version": "2.1.0",
         "name": ADDON_NAME,
         "description": "VixSrc Stream via Vercel",
         "logo": ADDON_LOGO,
@@ -254,109 +284,73 @@ async def streams(request: Request, type: str, id: str):
             data = await extractor.get_streams(id, type, client, base_url)
         return respond_with(data or {"streams": []})
     except Exception as e:
-        logger.error(f"❌ /stream route error: {e}")
+        logger.error(f"❌ /stream: {e}")
         return respond_with({"streams": []})
 
 
 # ============================================================================
-# HLS PROXY — recupera /playlist/XXXXX con i giusti header e lo serve a Stremio
+# HLS PROXY
 # ============================================================================
 @app.get("/U0MQ/proxy/hls")
 async def hls_proxy(request: Request, url: str):
-    """
-    Proxy trasparente per HLS manifest/segment.
-    Stremio chiama questo endpoint; noi chiamiamo VixSrc con i giusti header.
-    Se il body è un manifest M3U8, riscriviamo i segmenti relativi in URL assoluti.
-    """
     if not url.startswith("https://"):
         raise HTTPException(status_code=400, detail="Invalid URL")
+
+    proxy_base = str(request.base_url)  # es. https://ufo-pearl-theta.vercel.app/
 
     try:
         async with AsyncSession() as client:
             response = await client.get(
                 url,
                 headers=PROXY_HEADERS,
-                timeout=20,
+                timeout=25,
                 allow_redirects=True,
                 impersonate=IMPERSONATE,
             )
 
-        content_type = response.headers.get("content-type", "application/octet-stream")
-        body = response.content
+        actual_url = str(response.url)  # URL finale dopo redirect
+        content_type = response.headers.get("content-type", "application/octet-stream").lower()
+        body_bytes = response.content
 
-        # Se è un manifest M3U8, riscriviamo i segmenti relativi
-        if b"#EXTM3U" in body[:20]:
-            content_type = "application/vnd.apple.mpegurl"
-            text = body.decode("utf-8", errors="replace")
+        logger.info(
+            f"🛠 proxy: status={response.status_code} CT={content_type} "
+            f"len={len(body_bytes)} url={actual_url[:80]}"
+        )
 
-            # Base URL per i segmenti relativi: tutto fino all'ultimo /
-            base = url.rsplit("/", 1)[0] + "/"
+        # Determina se è un manifest M3U8
+        is_m3u8 = (
+            b"#EXTM3U" in body_bytes[:32]
+            or "mpegurl" in content_type
+            or actual_url.endswith(".m3u8")
+        )
 
-            lines = []
-            for line in text.splitlines():
-                stripped = line.strip()
-                if stripped and not stripped.startswith("#"):
-                    if stripped.startswith("http"):
-                        # segmento assoluto → proxalo
-                        enc = quote(stripped, safe="")
-                        line = f"{request.base_url}U0MQ/proxy/hls?url={enc}"
-                    elif stripped.startswith("/"):
-                        # path assoluto
-                        enc = quote(f"{VIXSRC_DOMAIN}{stripped}", safe="")
-                        line = f"{request.base_url}U0MQ/proxy/hls?url={enc}"
-                    else:
-                        # path relativo
-                        enc = quote(f"{base}{stripped}", safe="")
-                        line = f"{request.base_url}U0MQ/proxy/hls?url={enc}"
-                lines.append(line)
+        if is_m3u8:
+            text = body_bytes.decode("utf-8", errors="replace")
+            logger.info(f"📜 Raw M3U8 first 300 chars:\n{text[:300]}")
+            rewritten = rewrite_m3u8(text, actual_url, proxy_base)
+            return Response(
+                content=rewritten.encode("utf-8"),
+                status_code=200,
+                media_type="application/vnd.apple.mpegurl",
+                headers={"Access-Control-Allow-Origin": "*", "Cache-Control": "no-cache"},
+            )
 
-            body = "\n".join(lines).encode("utf-8")
-            logger.info(f"📺 M3U8 proxied and rewritten ({len(lines)} lines)")
-
+        # Segmenti binari (.ts, .mp4, chiavi, ecc.) - pass-through
         return Response(
-            content=body,
+            content=body_bytes,
             status_code=response.status_code,
             media_type=content_type,
-            headers={
-                "Access-Control-Allow-Origin": "*",
-                "Cache-Control": "no-cache",
-            },
+            headers={"Access-Control-Allow-Origin": "*", "Cache-Control": "no-cache"},
         )
 
     except Exception as e:
-        logger.error(f"❌ HLS proxy error for {url}: {e}")
+        logger.error(f"❌ HLS proxy error [{url[:60]}]: {e}")
         raise HTTPException(status_code=502, detail=str(e))
 
 
 # ============================================================================
 # DEBUG
 # ============================================================================
-@app.get("/U0MQ/debug/movie/{tmdb_id}")
-async def debug_movie(tmdb_id: str):
-    try:
-        async with AsyncSession() as client:
-            url = f"{VIXSRC_DOMAIN}/movie/{tmdb_id}/"
-            response = await client.get(url, headers=PROXY_HEADERS, timeout=20, impersonate=IMPERSONATE)
-            soup = BeautifulSoup(response.text, "lxml")
-            scripts = []
-            for i, s in enumerate(soup.find_all("script")):
-                content = s.string or s.text or ""
-                if len(content) > 20:
-                    scripts.append({
-                        "index": i,
-                        "has_masterPlaylist": "masterPlaylist" in content,
-                        "has_token": "token" in content,
-                        "preview": content[:500]
-                    })
-            return respond_with({
-                "status_code": response.status_code,
-                "final_url": str(response.url),
-                "scripts": scripts[:10],
-            })
-    except Exception as e:
-        return respond_with({"error": str(e)})
-
-
 @app.get("/U0MQ/debug/stream/{tmdb_id}")
 async def debug_stream(request: Request, tmdb_id: str):
     try:
@@ -368,5 +362,38 @@ async def debug_stream(request: Request, tmdb_id: str):
             "streams": data.get("streams", []),
             "valid": len(data.get("streams", [])) > 0
         })
+    except Exception as e:
+        return respond_with({"error": str(e)})
+
+
+@app.get("/U0MQ/debug/proxy-raw/{tmdb_id}")
+async def debug_proxy_raw(request: Request, tmdb_id: str):
+    """
+    Chiama direttamente il playlist URL e mostra il body grezzo.
+    Utile per capire cosa restituisce VixSrc prima della riscrittura.
+    """
+    try:
+        async with AsyncSession() as client:
+            ext = StreamingCommunityExtractor()
+            playlist_url = await ext.extract_playlist_url(
+                f"{VIXSRC_DOMAIN}/movie/{tmdb_id}/", client
+            )
+            if not playlist_url:
+                return respond_with({"error": "playlist_url not found"})
+
+            resp = await client.get(
+                playlist_url, headers=PROXY_HEADERS,
+                timeout=20, allow_redirects=True, impersonate=IMPERSONATE,
+            )
+            body = resp.text
+            return respond_with({
+                "playlist_url": playlist_url,
+                "final_url": str(resp.url),
+                "status_code": resp.status_code,
+                "content_type": resp.headers.get("content-type", ""),
+                "body_length": len(body),
+                "body_preview": body[:1000],
+                "is_m3u8": body.strip().startswith("#EXTM3U"),
+            })
     except Exception as e:
         return respond_with({"error": str(e)})
