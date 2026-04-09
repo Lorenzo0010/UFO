@@ -49,6 +49,21 @@ def make_proxy_url(base_url: str, target_url: str) -> str:
     return f"{base_url}/U0MQ/proxy/hls?url={encoded}"
 
 
+def get_m3u8_base(url: str) -> str:
+    """
+    Calcola la base URL corretta per risolvere URI relativi in un M3U8.
+    Rimuove la query string e prende la directory del path.
+    Es: https://cdn.vixsrc.to/hls/abc/index.m3u8?token=x
+     -> https://cdn.vixsrc.to/hls/abc/
+    """
+    parsed = urlparse(url)
+    # Rimuovi query string, prendi solo schema+netloc+path
+    clean_path = parsed.scheme + "://" + parsed.netloc + parsed.path
+    # Prendi la directory (tutto prima dell'ultimo /)
+    base = clean_path.rsplit("/", 1)[0] + "/"
+    return base
+
+
 async def get_tmdb_id_from_imdb(imdb_id: str, client: AsyncSession) -> Optional[int]:
     try:
         response = await client.get(
@@ -212,10 +227,6 @@ def get_base_url(request: Request) -> str:
 # ============================================================================
 @app.head("/U0MQ/proxy/hls")
 async def hls_proxy_head(url: str):
-    """
-    Risponde alle HEAD request del player/Stremio prima del GET.
-    Senza questo FastAPI restituisce 405 Method Not Allowed.
-    """
     return StreamingResponse(
         iter([]),
         media_type="video/mp2t",
@@ -229,12 +240,10 @@ async def hls_proxy(request: Request, url: str):
     Proxy trasparente per HLS:
     - Scarica manifest/segmenti con gli header VixSrc richiesti
     - Riscrive gli URL nel manifest per passare anch'essi per questo proxy
-    - La AsyncSession rimane aperta finché lo streaming del segmento .ts non termina
+    - Gestisce sia master playlist (multi-qualità) che media playlist (segmenti .ts)
     """
     base_url = get_base_url(request)
     try:
-        # NON usare `async with` qui: la sessione deve restare aperta
-        # per tutta la durata della StreamingResponse sui segmenti .ts
         client = AsyncSession()
         resp = await client.get(
             url,
@@ -244,25 +253,32 @@ async def hls_proxy(request: Request, url: str):
         )
 
         content_type = resp.headers.get("content-type", "")
-        logger.info(f"🛠 proxy: status={resp.status_code} CT={content_type[:30]} url={url[:80]}")
+        logger.info(f"🛠 proxy: status={resp.status_code} CT={content_type[:40]} url={url[:80]}")
 
         if resp.status_code != 200:
             await client.close()
             raise HTTPException(status_code=resp.status_code, detail="Upstream error")
 
+        # Determina se è un M3U8 (master o media playlist)
         is_m3u8 = (
             "mpegurl" in content_type.lower()
             or "x-mpegurl" in content_type.lower()
-            or url.split("?")[0].endswith(".m3u8")
+            or url.split("?")[0].lower().endswith(".m3u8")
         )
 
         if is_m3u8:
-            # Per i manifest leggiamo tutto subito, poi chiudiamo la sessione
             text = resp.text
             await client.close()
-            base = url.rsplit("/", 1)[0] + "/"
-            rewritten = rewrite_m3u8(text, base, base_url)
-            logger.info("📺 M3U8 proxied and rewritten")
+
+            # Calcola la base corretta rimuovendo query string e prendendo la directory
+            media_base = get_m3u8_base(url)
+
+            # Controlla se è un master playlist (contiene varianti .m3u8)
+            is_master = "#EXT-X-STREAM-INF" in text or "#EXT-X-MEDIA" in text
+            playlist_type = "master" if is_master else "media"
+            logger.info(f"📺 M3U8 {playlist_type} proxied and rewritten (base: {media_base})")
+
+            rewritten = rewrite_m3u8(text, media_base, base_url)
             return StreamingResponse(
                 iter([rewritten.encode()]),
                 media_type="application/vnd.apple.mpegurl",
@@ -270,7 +286,6 @@ async def hls_proxy(request: Request, url: str):
             )
 
         # Segmento .ts o altro binario: streaming chunk per chunk
-        # Il generatore chiude la sessione solo al termine (finally)
         async def stream_and_close():
             try:
                 async for chunk in resp.aiter_content():
@@ -294,20 +309,22 @@ async def hls_proxy(request: Request, url: str):
 def rewrite_m3u8(content: str, base_url_media: str, addon_base: str) -> str:
     """
     Riscrive ogni URI nel manifest M3U8 per passare attraverso il proxy interno.
-    Gestisce URI relativi e assoluti.
+    Gestisce URI relativi e assoluti, sia in righe di dati che negli attributi URI="...".
     """
     lines = content.splitlines()
     result = []
     for line in lines:
         stripped = line.strip()
         if stripped.startswith("#"):
+            # Riscrivi URI="..." negli attributi (es. #EXT-X-KEY, #EXT-X-MEDIA)
             line = re.sub(
                 r'URI="([^"]+)"',
                 lambda m: f'URI="{make_proxy_url(addon_base, resolve_url(m.group(1), base_url_media))}"',
                 line
             )
             result.append(line)
-        elif stripped and not stripped.startswith("#"):
+        elif stripped:
+            # Riga dati: può essere un .m3u8 (variante) o un .ts (segmento)
             resolved = resolve_url(stripped, base_url_media)
             result.append(make_proxy_url(addon_base, resolved))
         else:
@@ -339,7 +356,7 @@ async def root(request: Request):
 async def manifest():
     return respond_with({
         "id": "org.stremio.mammamia.ufo",
-        "version": "1.4.0",
+        "version": "1.5.0",
         "name": ADDON_NAME,
         "description": "VixSrc Stream",
         "logo": ADDON_LOGO,
