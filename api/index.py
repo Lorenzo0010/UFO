@@ -77,7 +77,7 @@ class StreamingCommunityExtractor:
         self.random_headers = Headers()
 
     async def extract_playlist_url(self, link: str, client: AsyncSession) -> Optional[str]:
-        """Estrae il playlist URL grezzo da VixSrc (stesso IP di Vercel)."""
+        """Estrae il playlist URL grezzo da VixSrc."""
         try:
             logger.info(f"🔍 Fetching: {link}")
             headers = self.random_headers.generate()
@@ -157,7 +157,6 @@ class StreamingCommunityExtractor:
             playlist_url = await self.extract_playlist_url(page_url, client)
 
             if playlist_url:
-                # Proxy interno: stesso IP di Vercel che ha estratto il token
                 proxied_url = make_proxy_url(base_url, playlist_url)
                 logger.info(f"✅ Proxied stream: {proxied_url}")
 
@@ -211,31 +210,46 @@ def get_base_url(request: Request) -> str:
 # ============================================================================
 # HLS PROXY INTERNO
 # ============================================================================
+@app.head("/U0MQ/proxy/hls")
+async def hls_proxy_head(url: str):
+    """
+    Risponde alle HEAD request del player/Stremio prima del GET.
+    Senza questo FastAPI restituisce 405 Method Not Allowed.
+    """
+    return StreamingResponse(
+        iter([]),
+        media_type="video/mp2t",
+        headers={"Access-Control-Allow-Origin": "*"}
+    )
+
+
 @app.get("/U0MQ/proxy/hls")
 async def hls_proxy(request: Request, url: str):
     """
     Proxy trasparente per HLS:
     - Scarica manifest/segmenti con gli header VixSrc richiesti
     - Riscrive gli URL nel manifest per passare anch'essi per questo proxy
-    - Stesso IP di Vercel => token valido
+    - La AsyncSession rimane aperta finché lo streaming del segmento .ts non termina
     """
     base_url = get_base_url(request)
     try:
-        async with AsyncSession() as client:
-            resp = await client.get(
-                url,
-                headers=PROXY_HEADERS,
-                timeout=20,
-                allow_redirects=True
-            )
+        # NON usare `async with` qui: la sessione deve restare aperta
+        # per tutta la durata della StreamingResponse sui segmenti .ts
+        client = AsyncSession()
+        resp = await client.get(
+            url,
+            headers=PROXY_HEADERS,
+            timeout=20,
+            allow_redirects=True
+        )
 
         content_type = resp.headers.get("content-type", "")
         logger.info(f"🛠 proxy: status={resp.status_code} CT={content_type[:30]} url={url[:80]}")
 
         if resp.status_code != 200:
+            await client.close()
             raise HTTPException(status_code=resp.status_code, detail="Upstream error")
 
-        # Se è un manifest M3U8, riscriviamo gli URL interni
         is_m3u8 = (
             "mpegurl" in content_type.lower()
             or "x-mpegurl" in content_type.lower()
@@ -243,19 +257,29 @@ async def hls_proxy(request: Request, url: str):
         )
 
         if is_m3u8:
+            # Per i manifest leggiamo tutto subito, poi chiudiamo la sessione
             text = resp.text
-            base = url.rsplit("/", 1)[0] + "/"  # directory base dell'URL
+            await client.close()
+            base = url.rsplit("/", 1)[0] + "/"
             rewritten = rewrite_m3u8(text, base, base_url)
-            logger.info(f"📺 M3U8 proxied and rewritten")
+            logger.info("📺 M3U8 proxied and rewritten")
             return StreamingResponse(
                 iter([rewritten.encode()]),
                 media_type="application/vnd.apple.mpegurl",
                 headers={"Access-Control-Allow-Origin": "*"}
             )
 
-        # Segmento .ts o altro: streaming diretto
+        # Segmento .ts o altro binario: streaming chunk per chunk
+        # Il generatore chiude la sessione solo al termine (finally)
+        async def stream_and_close():
+            try:
+                async for chunk in resp.aiter_content():
+                    yield chunk
+            finally:
+                await client.close()
+
         return StreamingResponse(
-            resp.aiter_content(),
+            stream_and_close(),
             media_type=content_type or "video/mp2t",
             headers={"Access-Control-Allow-Origin": "*"}
         )
@@ -277,7 +301,6 @@ def rewrite_m3u8(content: str, base_url_media: str, addon_base: str) -> str:
     for line in lines:
         stripped = line.strip()
         if stripped.startswith("#"):
-            # Gestisce URI dentro tag come #EXT-X-KEY:URI="..." e #EXT-X-MAP:URI="..."
             line = re.sub(
                 r'URI="([^"]+)"',
                 lambda m: f'URI="{make_proxy_url(addon_base, resolve_url(m.group(1), base_url_media))}"',
@@ -285,7 +308,6 @@ def rewrite_m3u8(content: str, base_url_media: str, addon_base: str) -> str:
             )
             result.append(line)
         elif stripped and not stripped.startswith("#"):
-            # Linea URI (segmento .ts o sotto-playlist .m3u8)
             resolved = resolve_url(stripped, base_url_media)
             result.append(make_proxy_url(addon_base, resolved))
         else:
