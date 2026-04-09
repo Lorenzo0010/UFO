@@ -1,15 +1,10 @@
 {
-  "headers": [
-    {
-      "source": "/U0MQ/(.*)",
-      "headers": [
-        { "key": "Cache-Control", "value": "no-store, no-cache, must-revalidate, max-age=0" },
-        { "key": "Pragma", "value": "no-cache" }
-      ]
-    }
+  "rewrites": [
+    { "source": "/(.*)", "destination": "/api/index.py" }
   ],
   "functions": {
     "api/index.py": {
+      "runtime": "python3.12",
       "maxDuration": 60
     }
   }
