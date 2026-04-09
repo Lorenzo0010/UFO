@@ -31,8 +31,11 @@ CONFIG = {
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-USER_AGENT = "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:127.0) Gecko/20100101 Firefox/127.0"
+USER_AGENT = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36"
 TMDB_API_KEY = os.getenv("TMDB_KEY", "536b1c46da222eb34b69d168f092b495")
+
+# Impersona Chrome 110 per bypassare Cloudflare/anti-bot
+IMPERSONATE = "chrome110"
 
 
 def clean_id(id_str: str) -> str:
@@ -57,6 +60,7 @@ async def get_tmdb_id_from_imdb(imdb_id: str, client: AsyncSession) -> Optional[
                 "language": "it",
             },
             timeout=15,
+            impersonate=IMPERSONATE,
         )
         if response.status_code != 200:
             logger.warning(f"TMDB lookup failed for {imdb_id}: {response.status_code}")
@@ -93,17 +97,32 @@ class StreamingCommunityExtractor:
             if "token" not in content or "expires" not in content:
                 continue
 
-            token_match = re.search(r"'token':\s*'([^']+)'", content)
-            expires_match = re.search(r"'expires':\s*'(\d+)'", content)
-            url_match = re.search(r"url:\s*'([^']+)'", content)
+            # Supporta sia apici singoli che doppi
+            token_match = (
+                re.search(r"['\"]token['\"]:\s*['\"]([^'\"]+)['\"]", content)
+                or re.search(r"token:\s*['\"]([^'\"]+)['\"]", content)
+            )
+            expires_match = (
+                re.search(r"['\"]expires['\"]:\s*['\"](\d+)['\"]", content)
+                or re.search(r"expires:\s*['\"](\d+)['\"]", content)
+            )
+            url_match = (
+                re.search(r"['\"]url['\"]:\s*['\"]([^'\"]+)['\"]", content)
+                or re.search(r"url:\s*['\"]([^'\"]+)['\"]", content)
+            )
+
+            logger.info(f"📜 Script match → token:{bool(token_match)} expires:{bool(expires_match)} url:{bool(url_match)}")
 
             if token_match and expires_match and url_match:
-                return {
+                result = {
                     "token": token_match.group(1),
                     "expires": expires_match.group(1),
                     "url": url_match.group(1),
                     "fhd": "1" if "window.canPlayFHD = true" in content else "0",
                 }
+                logger.info(f"🎯 Parsed stream data: url={result['url']} token={result['token'][:8]}...")
+                return result
+
         return None
 
     def build_candidate_url(self, data: Dict[str, str]) -> str:
@@ -121,19 +140,21 @@ class StreamingCommunityExtractor:
                 headers=self.build_headers(page_url),
                 timeout=20,
                 allow_redirects=True,
+                impersonate=IMPERSONATE,
             )
 
             final_url = str(response.url)
             content_type = response.headers.get("content-type", "").lower()
             body_start = ""
             try:
-                body_start = response.text[:200]
+                body_start = response.text[:300]
             except Exception:
                 body_start = ""
 
             logger.info(f"🧪 Candidate URL: {candidate_url}")
             logger.info(f"✅ Final URL: {final_url}")
             logger.info(f"📄 Content-Type: {content_type}")
+            logger.info(f"📝 Body start: {body_start[:100]}")
 
             if ".m3u8" in final_url:
                 return final_url
@@ -144,7 +165,7 @@ class StreamingCommunityExtractor:
             if "#EXTM3U" in body_start:
                 return final_url
 
-            logger.warning("Resolved URL is not a valid HLS manifest")
+            logger.warning(f"⚠️ Resolved URL is not a valid HLS manifest. CT={content_type} body={body_start[:80]}")
             return None
 
         except Exception as e:
@@ -154,15 +175,33 @@ class StreamingCommunityExtractor:
     async def extract_vixcloud_url(self, link: str, client: AsyncSession) -> Optional[str]:
         try:
             logger.info(f"🔍 Fetching page: {link}")
-            response = await client.get(link, headers=self.build_headers(), timeout=20)
+            response = await client.get(
+                link,
+                headers=self.build_headers(),
+                timeout=20,
+                impersonate=IMPERSONATE,
+            )
+
+            logger.info(f"📡 Page status: {response.status_code} | CT: {response.headers.get('content-type','?')}")
 
             if response.status_code != 200:
                 logger.warning(f"Page fetch failed: {response.status_code} - {link}")
+                logger.warning(f"Response body preview: {response.text[:300]}")
                 return None
+
+            # Log script count per debug
+            soup = BeautifulSoup(response.text, "lxml")
+            script_count = len(soup.find_all("script"))
+            logger.info(f"📊 Scripts found in page: {script_count}")
 
             parsed = self.parse_stream_data(response.text)
             if not parsed:
-                logger.warning("No stream block found in page scripts")
+                logger.warning("❌ No stream block found in page scripts")
+                # Log preview degli script che contengono "token"
+                for i, s in enumerate(soup.find_all("script")):
+                    c = s.string or s.text or ""
+                    if "token" in c or "expires" in c:
+                        logger.info(f"🔎 Script[{i}] preview (has token/expires): {c[:200]}")
                 return None
 
             candidate_url = self.build_candidate_url(parsed)
@@ -273,7 +312,7 @@ async def root(request: Request):
 async def manifest():
     return respond_with({
         "id": "org.stremio.mammamia.ufo",
-        "version": "1.4.0",
+        "version": "1.5.0",
         "name": ADDON_NAME,
         "description": "VixSrc Stream via Vercel",
         "logo": ADDON_LOGO,
@@ -315,3 +354,45 @@ async def meta(type: str, id: str):
 @app.get("/U0MQ/catalog/{type}/{id}.json")
 async def catalog(type: str, id: str):
     return respond_with({"metas": []})
+
+
+# ============================================================================
+# ENDPOINT DI DEBUG - rimuovi in produzione
+# ============================================================================
+@app.get("/U0MQ/debug/movie/{tmdb_id}")
+async def debug_movie(tmdb_id: str):
+    """Debug endpoint: mostra gli script trovati nella pagina VixSrc"""
+    try:
+        async with AsyncSession() as client:
+            url = f"https://vixsrc.to/movie/{tmdb_id}/"
+            headers = {
+                "User-Agent": USER_AGENT,
+                "Referer": "https://vixsrc.to/",
+                "Origin": "https://vixsrc.to"
+            }
+            response = await client.get(url, headers=headers, timeout=20, impersonate=IMPERSONATE)
+
+            soup = BeautifulSoup(response.text, "lxml")
+            scripts = []
+            for i, s in enumerate(soup.find_all("script")):
+                content = s.string or s.text or ""
+                if len(content) > 20:
+                    scripts.append({
+                        "index": i,
+                        "length": len(content),
+                        "has_token": "token" in content,
+                        "has_expires": "expires" in content,
+                        "has_url": "url" in content,
+                        "preview": content[:400]
+                    })
+
+            return respond_with({
+                "status_code": response.status_code,
+                "final_url": str(response.url),
+                "content_type": response.headers.get("content-type", ""),
+                "page_length": len(response.text),
+                "scripts_count": len(scripts),
+                "scripts_with_token": [s for s in scripts if s["has_token"]],
+            })
+    except Exception as e:
+        return respond_with({"error": str(e)})
