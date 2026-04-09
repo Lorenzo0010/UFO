@@ -102,7 +102,6 @@ class StreamingCommunityExtractor:
                     logger.info(f"  token={bool(token_match)}, expires={bool(expires_match)}, url={bool(url_match)}")
 
                     if not all([token_match, expires_match, url_match]):
-                        # prova pattern alternativo
                         token_match = re.search(r'"token":\s*"(\w+)"', content)
                         expires_match = re.search(r'"expires":\s*"(\d+)"', content)
                         url_match = re.search(r'"url":\s*"([^"]+)"', content)
@@ -172,7 +171,6 @@ class StreamingCommunityExtractor:
             stream_url = await self.extract_vixcloud_url(url, client)
 
             if stream_url:
-                # Costruisci proxy URL
                 base_url = str(request.base_url).rstrip("/")
                 encoded = urllib.parse.quote(stream_url, safe='')
                 proxy_url = f"{base_url}/U0MQ/proxy/hls?url={encoded}"
@@ -227,16 +225,25 @@ def respond_with(data: Any, cache: bool = False) -> JSONResponse:
     return resp
 
 
+def make_proxy_uri(uri: str, decoded_url: str, proxy_base: str) -> str:
+    """Converte un URI (assoluto o relativo) in un URL proxiato."""
+    if uri.startswith("http"):
+        return f'{proxy_base}{urllib.parse.quote(uri, safe="")}'
+    else:
+        base = decoded_url.rsplit("/", 1)[0]
+        absolute = f"{base}/{uri.lstrip('/')}"
+        return f'{proxy_base}{urllib.parse.quote(absolute, safe="")}'
+
+
 # ============================================================================
-# PROXY HLS — riscrive tutti gli URL interni puntando a se stesso
+# PROXY HLS
 # ============================================================================
 @app.get("/U0MQ/proxy/hls")
 async def proxy_hls(url: str, request: Request):
     """
     Proxy trasparente per manifest HLS di VixSrc/VixCloud.
-    Riscrive tutti gli URI interni (audio, video, subtitle, segmenti .ts)
-    facendoli passare di nuovo attraverso questo proxy, così i token
-    per-rendition vengono preservati e il player non riceve 403.
+    Riscrive tutti gli URI interni (audio, video, subtitle, segmenti .ts,
+    e la chiave AES-128) facendoli passare attraverso questo proxy.
     """
     try:
         decoded_url = urllib.parse.unquote(url)
@@ -258,34 +265,37 @@ async def proxy_hls(url: str, request: Request):
         content_type = resp.headers.get("content-type", "")
         body = resp.text
 
-        # Se è un manifest HLS, riscriviamo gli URI
+        # Se è un manifest HLS, riscriviamo tutti gli URI
         if "mpegurl" in content_type or body.strip().startswith("#EXTM3U"):
             lines = body.splitlines()
             new_lines = []
             for line in lines:
                 stripped = line.strip()
-                if stripped and not stripped.startswith("#"):
-                    # È un URI — lo proxiamo
-                    if stripped.startswith("http"):
-                        encoded = urllib.parse.quote(stripped, safe='')
-                    else:
-                        # URI relativo: lo risolviamo rispetto all'URL base
-                        base = decoded_url.rsplit("/", 1)[0]
-                        absolute = f"{base}/{stripped}"
-                        encoded = urllib.parse.quote(absolute, safe='')
-                    new_lines.append(f"{proxy_base}{encoded}")
-                elif stripped.startswith("#EXT-X-MEDIA:") or stripped.startswith("#EXT-X-STREAM-INF:") or stripped.startswith("#EXT-X-I-FRAME-STREAM-INF:"):
-                    # Riscriviamo URI= dentro le direttive
+
+                # --- Riga #EXT-X-KEY: riscriviamo solo l'URI della chiave AES ---
+                if stripped.startswith("#EXT-X-KEY:"):
+                    def rewrite_key(m):
+                        key_uri = m.group(1)
+                        proxied = make_proxy_uri(key_uri, decoded_url, proxy_base)
+                        return f'URI="{proxied}"'
+                    line = re.sub(r'URI="([^"]+)"', rewrite_key, line)
+                    new_lines.append(line)
+
+                # --- Righe con URI= dentro direttive (#EXT-X-MEDIA, #EXT-X-STREAM-INF, ecc.) ---
+                elif stripped.startswith(("#EXT-X-MEDIA:", "#EXT-X-STREAM-INF:", "#EXT-X-I-FRAME-STREAM-INF:")):
                     def rewrite_uri(m):
                         uri_val = m.group(1)
-                        if uri_val.startswith("http"):
-                            enc = urllib.parse.quote(uri_val, safe='')
-                        else:
-                            base = decoded_url.rsplit("/", 1)[0]
-                            enc = urllib.parse.quote(f"{base}/{uri_val}", safe='')
-                        return f'URI="{proxy_base}{enc}"'
+                        proxied = make_proxy_uri(uri_val, decoded_url, proxy_base)
+                        return f'URI="{proxied}"'
                     line = re.sub(r'URI="([^"]+)"', rewrite_uri, line)
                     new_lines.append(line)
+
+                # --- URI di segmento (riga non-commento non vuota) ---
+                elif stripped and not stripped.startswith("#"):
+                    proxied = make_proxy_uri(stripped, decoded_url, proxy_base)
+                    new_lines.append(proxied)
+
+                # --- Tutto il resto (commenti, tag senza URI) ---
                 else:
                     new_lines.append(line)
 
@@ -299,7 +309,7 @@ async def proxy_hls(url: str, request: Request):
                 }
             )
 
-        # Altrimenti passa direttamente (segmenti .ts, subtitle .vtt, ecc.)
+        # Segmenti .ts, chiavi .key, subtitle .vtt — passa direttamente
         return Response(
             content=resp.content,
             media_type=content_type or "application/octet-stream",
@@ -333,7 +343,7 @@ async def root(request: Request):
 async def manifest():
     config = {
         "id": "org.stremio.ufo.streamingcommunity",
-        "version": "1.4.0",
+        "version": "1.4.1",
         "name": ADDON_NAME,
         "description": "VixSrc Stream via Vercel Proxy",
         "logo": ADDON_LOGO,
