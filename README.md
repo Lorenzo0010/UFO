@@ -85,7 +85,6 @@ UFO/
 │   ├── tmdb.py           # Risoluzione IMDb ID → TMDB ID tramite API TMDB
 │   └── resolver.py       # Logica principale: costruzione URL VixSrc + URL EasyProxy
 ├── Procfile              # Comando di avvio letto da Koyeb: uvicorn api.index:app
-├── railway.json          # Configurazione deploy Railway (riferimento alternativo)
 ├── requirements.txt      # Dipendenze Python: fastapi, httpx, uvicorn, python-dotenv
 └── README.md
 ```
@@ -125,13 +124,10 @@ Entry point dell'applicazione. Inizializza FastAPI, aggiunge il middleware CORS 
 | `GET /U0MQ/catalog/{type}/{id}.json` | Catalogo vuoto (l'addon non fornisce cataloghi) |
 
 #### `Procfile`
-Dice a Koyeb (e a qualsiasi piattaforma compatibile con Heroku Buildpack) come avviare l'app:
+Dice a Koyeb come avviare l'app:
 ```
 web: uvicorn api.index:app --host 0.0.0.0 --port $PORT
 ```
-
-#### `railway.json`
-Configurazione equivalente per Railway. Non necessario su Koyeb ma utile come riferimento se si vuole migrare o testare su Railway.
 
 #### `requirements.txt`
 | Pacchetto | Utilizzo |
