@@ -7,11 +7,38 @@
 
 ## Come funziona
 
-1. Stremio richiede uno stream per un film o una serie (con ID IMDb o TMDB)
-2. L'addon risolve l'ID su **TMDB** per ottenere l'ID numerico
-3. Costruisce l'URL della pagina **VixSrc** corrispondente
-4. Passa quell'URL a **EasyProxy**, che effettua lo scraping e restituisce un manifest `.m3u8` prontamente accessibile
-5. Stremio riproduce lo stream HLS direttamente
+UFO fa da ponte tra Stremio e VixSrc, aggirando il blocco degli IP datacenter grazie a EasyProxy.
+
+```
+Stremio
+  │
+  │  GET /U0MQ/stream/{type}/{id}.json
+  ▼
+api/index.py  ──►  api/resolver.py
+                        │
+                        │  1. Risolve IMDb ID → TMDB ID  (via api/tmdb.py)
+                        │  2. Costruisce URL pagina VixSrc
+                        │  3. Genera URL EasyProxy con ?d=<vixsrc_page>
+                        │
+                        ▼
+                   EasyProxy (MediaFlow Proxy)
+                        │  scraping pagina VixSrc + fetch manifest HLS
+                        ▼
+                   manifest .m3u8  ◄──── Stremio riproduce lo stream
+```
+
+### Flusso dettagliato
+
+1. **Stremio** invia una richiesta all'addon con l'ID del contenuto (IMDb `tt…` o TMDB numerico) e il tipo (`movie` / `series`)
+2. **`resolver.py`** divide l'ID in parti: `content_id`, `season`, `episode` (per le serie)
+3. **`tmdb.py`** chiama l'API TMDB `/find/{imdb_id}` per ottenere l'ID numerico TMDB (se l'ID è già numerico, lo usa direttamente)
+4. Viene costruita la **URL della pagina VixSrc** nel formato:
+   - Film: `https://vixsrc.to/movie/{tmdb_id}/`
+   - Serie: `https://vixsrc.to/tv/{tmdb_id}/{season}/{episode}/`
+5. Quella URL viene passata come parametro `?d=` a **EasyProxy**, che effettua lo scraping della pagina e restituisce un manifest `.m3u8` proxy-ato
+6. Lo stream viene restituito a Stremio come oggetto con `url`, `name` e `behaviorHints`
+
+> ⚠️ EasyProxy è **indispensabile**: VixSrc blocca le richieste dirette provenienti da IP di datacenter (come quelli di Koyeb).
 
 ---
 
@@ -20,15 +47,67 @@
 ```
 UFO/
 ├── api/
-│   ├── __init__.py
-│   ├── index.py       # Entry point FastAPI + route
-│   ├── config.py      # Variabili d'ambiente e costanti
-│   ├── tmdb.py        # Risoluzione IMDb → TMDB ID
-│   └── resolver.py    # Logica stream + costruzione URL EasyProxy
-├── Procfile           # Comando di avvio per Koyeb
-├── requirements.txt
+│   ├── __init__.py       # Rende api/ un package Python (necessario per gli import relativi)
+│   ├── index.py          # Entry point: app FastAPI, middleware CORS, tutte le route
+│   ├── config.py         # Costanti e lettura variabili d'ambiente (.env / Koyeb env vars)
+│   ├── tmdb.py           # Risoluzione IMDb ID → TMDB ID tramite API TMDB
+│   └── resolver.py       # Logica principale: costruzione URL VixSrc + URL EasyProxy
+├── Procfile              # Comando di avvio letto da Koyeb: uvicorn api.index:app
+├── railway.json          # Configurazione deploy Railway (riferimento alternativo)
+├── requirements.txt      # Dipendenze Python: fastapi, httpx, uvicorn, python-dotenv
 └── README.md
 ```
+
+### Descrizione file
+
+#### `api/__init__.py`
+File vuoto che trasforma la cartella `api/` in un package Python. Senza di esso gli import relativi (`from .config import ...`) non funzionerebbero.
+
+#### `api/config.py`
+Centralizza tutta la configurazione dell'addon. Legge le variabili d'ambiente con `os.getenv()` e fornisce valori di default. Importato da tutti gli altri moduli.
+
+```python
+EASYPROXY_URL = os.getenv("EASYPROXY_URL", "")   # URL istanza EasyProxy
+EASYPROXY_PSW = os.getenv("EASYPROXY_PASSWORD", "") # Password EasyProxy
+TMDB_API_KEY  = os.getenv("TMDB_KEY", "...")      # API key TMDB
+SC_DOMAIN     = os.getenv("SC_DOMAIN", "https://vixsrc.to")
+```
+
+#### `api/tmdb.py`
+Contiene la funzione `get_tmdb_id(content_id, content_type)`. Se l'ID è un IMDb ID (`tt…`), chiama l'endpoint `/find` di TMDB per convertirlo. Gestisce sia film che serie con fallback tra i due tipi.
+
+#### `api/resolver.py`
+Cuore logico dell'addon. Contiene:
+- `build_easyproxy_url(vixsrc_page_url)` — codifica l'URL VixSrc e costruisce l'URL EasyProxy con parametro `?d=` e `api_password` opzionale
+- `get_streams(stremio_id, content_type)` — orchestra la risoluzione TMDB, la costruzione dell'URL VixSrc e la generazione dello stream da restituire a Stremio
+
+#### `api/index.py`
+Entry point dell'applicazione. Inizializza FastAPI, aggiunge il middleware CORS (necessario per Stremio) e definisce tutte le route:
+
+| Route | Funzione |
+|---|---|
+| `GET /` | Status check + link al manifest |
+| `GET /U0MQ/manifest.json` | Manifest Stremio (nome, versione, tipi supportati) |
+| `GET /U0MQ/stream/{type}/{id}.json` | **Route principale** — risolve e restituisce gli stream |
+| `GET /U0MQ/meta/{type}/{id}.json` | Metadati stub (richiesto dal protocollo Stremio) |
+| `GET /U0MQ/catalog/{type}/{id}.json` | Catalogo vuoto (l'addon non fornisce cataloghi) |
+
+#### `Procfile`
+Dice a Koyeb (e a qualsiasi piattaforma compatibile con Heroku Buildpack) come avviare l'app:
+```
+web: uvicorn api.index:app --host 0.0.0.0 --port $PORT
+```
+
+#### `railway.json`
+Configurazione equivalente per Railway. Non necessario su Koyeb ma utile come riferimento se si vuole migrare o testare su Railway.
+
+#### `requirements.txt`
+| Pacchetto | Utilizzo |
+|---|---|
+| `fastapi` | Framework web per le API REST |
+| `uvicorn` | Server ASGI che esegue FastAPI |
+| `httpx` | Client HTTP asincrono per le chiamate a TMDB |
+| `python-dotenv` | Caricamento variabili da file `.env` in sviluppo locale |
 
 ---
 
@@ -108,18 +187,6 @@ EASYPROXY_URL=https://myproxy.example.com
 EASYPROXY_PASSWORD=mysecretpassword
 TMDB_KEY=la_tua_api_key_tmdb
 ```
-
----
-
-## Endpoint disponibili
-
-| Metodo | Path | Descrizione |
-|---|---|---|
-| `GET` | `/` | Status e link al manifest |
-| `GET` | `/U0MQ/manifest.json` | Manifest Stremio |
-| `GET` | `/U0MQ/stream/{type}/{id}.json` | Risoluzione stream |
-| `GET` | `/U0MQ/meta/{type}/{id}.json` | Metadati (stub) |
-| `GET` | `/U0MQ/catalog/{type}/{id}.json` | Catalogo (vuoto) |
 
 ---
 
