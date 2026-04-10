@@ -5,6 +5,38 @@
 
 ---
 
+## ⚠️ Disclaimer
+
+**Questo progetto è realizzato esclusivamente a scopo educativo e di ricerca.**
+
+L'autore non è responsabile di alcun utilizzo improprio, illegale o non autorizzato del presente software.
+Utilizzando questo progetto, l'utente accetta di assumersi la piena responsabilità delle proprie azioni e di rispettare le leggi vigenti nel proprio paese.
+
+- Questo addon **non ospita, non distribuisce e non indicizza** alcun contenuto multimediale
+- Funziona esclusivamente come **proxy di reindirizzamento** verso sorgenti di terze parti pubblicamente accessibili
+- L'autore **non ha alcun controllo** sui contenuti forniti da sorgenti esterne (VixSrc, EasyProxy, TMDB)
+- L'autore **non garantisce** la disponibilità, la legalità o la qualità dei contenuti raggiungibili tramite questo software
+- È responsabilità dell'utente verificare che l'utilizzo di questo software sia conforme alle leggi del proprio paese
+
+> **L'autore declina ogni responsabilità civile e penale derivante dall'uso di questo software.**
+
+---
+
+## 📚 Scopo educativo
+
+Questo progetto nasce come studio pratico dei seguenti argomenti:
+
+- Sviluppo di API REST con **FastAPI** e Python asincrono
+- Integrazione con API di terze parti (**TMDB API**)
+- Architettura di addon per **Stremio** e il relativo protocollo
+- Utilizzo di proxy HLS (**MediaFlow Proxy / EasyProxy**) per la gestione di stream
+- Deploy su piattaforme cloud moderne (**Koyeb**)
+- Strutturazione di progetti Python in moduli riutilizzabili
+
+Il codice è intenzionalmente documentato e organizzato per essere comprensibile e riutilizzabile come riferimento didattico.
+
+---
+
 ## Come funziona
 
 UFO fa da ponte tra Stremio e VixSrc, aggirando il blocco degli IP datacenter grazie a EasyProxy.
@@ -67,9 +99,9 @@ File vuoto che trasforma la cartella `api/` in un package Python. Senza di esso 
 Centralizza tutta la configurazione dell'addon. Legge le variabili d'ambiente con `os.getenv()` e fornisce valori di default. Importato da tutti gli altri moduli.
 
 ```python
-EASYPROXY_URL = os.getenv("EASYPROXY_URL", "")   # URL istanza EasyProxy
+EASYPROXY_URL = os.getenv("EASYPROXY_URL", "")     # URL istanza EasyProxy
 EASYPROXY_PSW = os.getenv("EASYPROXY_PASSWORD", "") # Password EasyProxy
-TMDB_API_KEY  = os.getenv("TMDB_KEY", "...")      # API key TMDB
+TMDB_API_KEY  = os.getenv("TMDB_KEY", "...")        # API key TMDB
 SC_DOMAIN     = os.getenv("SC_DOMAIN", "https://vixsrc.to")
 ```
 
@@ -190,6 +222,21 @@ TMDB_KEY=la_tua_api_key_tmdb
 
 ---
 
+## Endpoint disponibili
+
+| Metodo | Path | Descrizione |
+|---|---|---|
+| `GET` | `/` | Status e link al manifest |
+| `GET` | `/U0MQ/manifest.json` | Manifest Stremio |
+| `GET` | `/U0MQ/stream/{type}/{id}.json` | Risoluzione stream |
+| `GET` | `/U0MQ/meta/{type}/{id}.json` | Metadati (stub) |
+| `GET` | `/U0MQ/catalog/{type}/{id}.json` | Catalogo (vuoto) |
+
+---
+
 ## Licenza
 
-MIT
+MIT License — vedi file [LICENSE](LICENSE) per i dettagli.
+
+Il software viene fornito **"as is"**, senza garanzie di alcun tipo, esplicite o implicite.
+L'autore non è responsabile per danni diretti, indiretti, incidentali o consequenziali derivanti dall'uso di questo software.
