@@ -146,7 +146,7 @@ async def get_streams(stremio_id: str, content_type: str) -> Dict:
             logger.info(f"✅ EasyProxy stream: {stream_url[:80]}")
             result["streams"].append({
                 "name": "🛸 UFO",
-                "title": "VixSrc • EasyProxy",
+                "title": "Vix 🇮🇹 • EasyProxy",
                 "url": stream_url,
                 "behaviorHints": {
                     "notWebReady": False,
@@ -164,7 +164,7 @@ async def get_streams(stremio_id: str, content_type: str) -> Dict:
                     logger.info(f"✅ MediaFlow stream: {stream_url[:80]}")
                     result["streams"].append({
                         "name": "🛸 UFO",
-                        "title": "VixSrc • MediaFlow",
+                        "title": "Vix 🇮🇹 • MediaFlow",
                         "url": stream_url,
                         "behaviorHints": {
                             "notWebReady": False,
@@ -180,7 +180,7 @@ async def get_streams(stremio_id: str, content_type: str) -> Dict:
         if m3u8_url:
             result["streams"].append({
                 "name": "🛸 UFO",
-                "title": "VixSrc • Diretto",
+                "title": "Vix 🇮🇹 • Diretto",
                 "url": m3u8_url,
                 "behaviorHints": {
                     "notWebReady": True,
