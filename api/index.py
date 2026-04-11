@@ -1,6 +1,8 @@
 import base64
 import json
 import logging
+import sys
+import os
 from pathlib import Path
 from string import Template
 from typing import Any
@@ -8,9 +10,15 @@ from typing import Any
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
+from mangum import Mangum
 
-from .config import ADDON_NAME, ADDON_LOGO
-from .resolver import get_streams
+# Assicura che la cartella api/ sia nel path per gli import assoluti
+api_dir = Path(__file__).parent
+if str(api_dir) not in sys.path:
+    sys.path.insert(0, str(api_dir))
+
+from config import ADDON_NAME, ADDON_LOGO  # noqa: E402
+from resolver import get_streams  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
@@ -23,7 +31,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-STATIC_DIR = Path(__file__).parent / "static"
+STATIC_DIR = api_dir / "static"
+
+# Handler per Vercel (ASGI -> Lambda-style)
+handler = Mangum(app, lifespan="off")
 
 
 def respond_with(data: Any) -> JSONResponse:
@@ -45,8 +56,6 @@ def decode_config(token: str) -> dict:
 @app.get("/", response_class=HTMLResponse)
 async def root(request: Request):
     base = str(request.base_url).rstrip("/")
-    # Usa string.Template ($var) invece di str.format() per evitare
-    # conflitti con regex tipo [0-9A-F]{2} nel JS
     html = (STATIC_DIR / "config.html").read_text(encoding="utf-8")
     html = Template(html).safe_substitute(
         BASE=base,
