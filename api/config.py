@@ -7,5 +7,10 @@ SC_DOMAIN    = os.getenv("SC_DOMAIN", "https://vixsrc.to")
 TMDB_API_KEY = os.getenv("TMDB_KEY", "536b1c46da222eb34b69d168f092b495")
 USER_AGENT   = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:131.0) Gecko/20100101 Firefox/131.0"
 
+# MediaFlow Proxy (nuovo)
+MEDIAFLOW_URL = os.getenv("MEDIAFLOW_URL", "").rstrip("/")
+MEDIAFLOW_PSW = os.getenv("MEDIAFLOW_PASSWORD", "")
+
+# EasyProxy (legacy, ignorato se MEDIAFLOW_URL è impostato)
 EASYPROXY_URL = os.getenv("EASYPROXY_URL", "").rstrip("/")
 EASYPROXY_PSW = os.getenv("EASYPROXY_PASSWORD", "")
