@@ -2,21 +2,21 @@ import logging
 from typing import Dict
 from urllib.parse import quote
 
-from .config import SC_DOMAIN, EASYPROXY_URL, EASYPROXY_PSW
+from .config import SC_DOMAIN
 from .tmdb import get_tmdb_id
 
 logger = logging.getLogger(__name__)
 
 
-def build_easyproxy_url(vixsrc_page_url: str) -> str:
+def build_proxy_url(vixsrc_page_url: str, proxy_url: str, proxy_psw: str) -> str:
     encoded = quote(vixsrc_page_url, safe="")
-    url = f"{EASYPROXY_URL}/proxy/hls/manifest.m3u8?d={encoded}"
-    if EASYPROXY_PSW:
-        url += f"&api_password={quote(EASYPROXY_PSW, safe='')}"
+    url = f"{proxy_url}/proxy/hls/manifest.m3u8?d={encoded}"
+    if proxy_psw:
+        url += f"&api_password={quote(proxy_psw, safe='')}"
     return url
 
 
-async def get_streams(stremio_id: str, content_type: str) -> Dict:
+async def get_streams(stremio_id: str, content_type: str, proxy_url: str, proxy_psw: str) -> Dict:
     result: Dict = {"streams": []}
     try:
         parts      = stremio_id.split(":")
@@ -39,17 +39,13 @@ async def get_streams(stremio_id: str, content_type: str) -> Dict:
         )
         logger.info(f"VixSrc page: {page_url}")
 
-        if not EASYPROXY_URL:
-            logger.error("EASYPROXY_URL non configurato")
-            return result
-
-        stream_url = build_easyproxy_url(page_url)
+        stream_url = build_proxy_url(page_url, proxy_url, proxy_psw)
 
         if media_title:
-            if is_series:
-                stream_title = f"{media_title}\nStagione {season} Episodio {episode}"
-            else:
-                stream_title = media_title
+            stream_title = (
+                f"{media_title}\nStagione {season} Episodio {episode}"
+                if is_series else media_title
+            )
         else:
             stream_title = f"S{season}E{episode}" if is_series else "VixSrc"
 
