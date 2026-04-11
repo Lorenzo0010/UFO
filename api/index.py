@@ -49,14 +49,23 @@ async def manifest():
     proxy_mode = "EasyProxy" if EASYPROXY_URL else ("MediaFlow" if MEDIAFLOW_URL else "no proxy")
     return respond_with({
         "id": "org.stremio.mammamia.ufo",
-        "version": "1.5.0",
+        "version": "1.6.0",
         "name": ADDON_NAME,
         "description": f"VixSrc via {proxy_mode}",
         "logo": ADDON_LOGO,
-        "resources": ["stream"],
+        "resources": [
+            {
+                "name": "stream",
+                "types": ["movie", "series"],
+                "idPrefixes": ["tt", "tmdb"]
+            }
+        ],
         "types": ["movie", "series"],
         "catalogs": [],
-        "behaviorHints": {"configurable": False},
+        "behaviorHints": {
+            "configurable": False,
+            "adult": False
+        },
     })
 
 
@@ -68,6 +77,10 @@ async def streams_route(type: str, id: str):
         data = await get_streams(id, type)
     except Exception:
         data = {"streams": []}
+    # cacheMaxAge=0 forza Stremio a non cachare i token VixSrc (scadono in ~10 min)
+    data["cacheMaxAge"] = 0
+    data["staleRevalidate"] = 0
+    data["staleError"] = 0
     return respond_with(data)
 
 
