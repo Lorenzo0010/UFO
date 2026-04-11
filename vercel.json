@@ -5,7 +5,11 @@
       "src": "api/index.py",
       "use": "@vercel/python",
       "config": {
-        "includeFiles": ["api/static/**", "api/config.py", "api/resolver.py", "api/tmdb.py"]
+        "includeFiles": [
+          "api/config.py",
+          "api/resolver.py",
+          "api/tmdb.py"
+        ]
       }
     }
   ],

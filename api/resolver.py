@@ -2,8 +2,8 @@ import logging
 from typing import Dict
 from urllib.parse import quote
 
-from .config import SC_DOMAIN
-from .tmdb import get_tmdb_id
+import config as cfg
+from tmdb import get_tmdb_id
 
 logger = logging.getLogger(__name__)
 
@@ -33,9 +33,9 @@ async def get_streams(stremio_id: str, content_type: str, proxy_url: str, proxy_
         tmdb_id, media_title = tmdb_result
 
         page_url = (
-            f"{SC_DOMAIN}/tv/{tmdb_id}/{season}/{episode}/"
+            f"{cfg.SC_DOMAIN}/tv/{tmdb_id}/{season}/{episode}/"
             if is_series
-            else f"{SC_DOMAIN}/movie/{tmdb_id}/"
+            else f"{cfg.SC_DOMAIN}/movie/{tmdb_id}/"
         )
         logger.info(f"VixSrc page: {page_url}")
 
