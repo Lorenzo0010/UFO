@@ -9,10 +9,6 @@ logger = logging.getLogger(__name__)
 
 
 def build_easyproxy_url(vixsrc_page_url: str) -> str:
-    """
-    Costruisce l'URL EasyProxy nel formato:
-    EASYPROXY/proxy/hls/manifest.m3u8?d=<encoded_vixsrc_page>[&api_password=<pw>]
-    """
     encoded = quote(vixsrc_page_url, safe="")
     url = f"{EASYPROXY_URL}/proxy/hls/manifest.m3u8?d={encoded}"
     if EASYPROXY_PSW:
@@ -29,28 +25,37 @@ async def get_streams(stremio_id: str, content_type: str) -> Dict:
         episode    = parts[2] if len(parts) > 2 else None
         is_series  = content_type == "series" and season and episode
 
-        tmdb_id = await get_tmdb_id(content_id, content_type)
-        if not tmdb_id:
-            logger.warning(f"⚠️ TMDB ID non trovato per {content_id}")
+        tmdb_result = await get_tmdb_id(content_id, content_type)
+        if not tmdb_result:
+            logger.warning(f"TMDB ID non trovato per {content_id}")
             return result
+
+        tmdb_id, media_title = tmdb_result
 
         page_url = (
             f"{SC_DOMAIN}/tv/{tmdb_id}/{season}/{episode}/"
             if is_series
             else f"{SC_DOMAIN}/movie/{tmdb_id}/"
         )
-        logger.info(f"🎬 VixSrc page: {page_url}")
+        logger.info(f"VixSrc page: {page_url}")
 
         if not EASYPROXY_URL:
-            logger.error("❌ EASYPROXY_URL non configurato — nessuno stream possibile")
+            logger.error("EASYPROXY_URL non configurato")
             return result
 
         stream_url = build_easyproxy_url(page_url)
-        logger.info(f"✅ EasyProxy stream: {stream_url[:80]}...")
+
+        if media_title:
+            if is_series:
+                stream_title = f"{media_title}\nStagione {season} Episodio {episode}"
+            else:
+                stream_title = media_title
+        else:
+            stream_title = f"S{season}E{episode}" if is_series else "VixSrc"
 
         result["streams"].append({
-            "name": "🛸 UFO",
-            "title": "VixSrc • EasyProxy",
+            "name": "VIX",
+            "title": stream_title,
             "url": stream_url,
             "behaviorHints": {
                 "notWebReady": False,
@@ -58,5 +63,5 @@ async def get_streams(stremio_id: str, content_type: str) -> Dict:
             },
         })
     except Exception as e:
-        logger.error(f"❌ get_streams error: {e}")
+        logger.error(f"get_streams error: {e}")
     return result
