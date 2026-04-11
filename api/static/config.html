@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>UFO - Configurazione</title>
+  <title>${ADDON_NAME} - Configurazione</title>
   <style>
     *{box-sizing:border-box;margin:0;padding:0}
     body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#0f0f13;color:#e0e0e0;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:1rem}
@@ -29,8 +29,8 @@
 </head>
 <body>
   <div class="card">
-    <img class="logo" id="logo" src="" alt="UFO">
-    <h1 id="aname"></h1>
+    <img class="logo" src="${ADDON_LOGO}" alt="UFO">
+    <h1>${ADDON_NAME}</h1>
     <p class="sub">Inserisci il tuo proxy MediaFlow per generare il manifest Stremio</p>
     <label for="pu">URL proxy (MediaFlow / EasyProxy)</label>
     <input id="pu" type="url" placeholder="https://mio-proxy.vercel.app" />
@@ -48,13 +48,9 @@
     </div>
   </div>
   <script>
-    // Legge nome/logo iniettati dal server come meta tag
-    const BASE = document.querySelector('meta[name="base"]').content;
-    document.getElementById('logo').src = document.querySelector('meta[name="logo"]').content;
-    document.getElementById('aname').textContent = document.querySelector('meta[name="aname"]').content;
+    const BASE = '${BASE}';
 
     function b64u(s) {
-      // btoa sicuro per UTF-8
       const bytes = new TextEncoder().encode(s);
       let bin = '';
       bytes.forEach(b => bin += String.fromCharCode(b));

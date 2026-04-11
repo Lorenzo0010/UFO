@@ -1,8 +1,8 @@
 import base64
 import json
 import logging
-import os
 from pathlib import Path
+from string import Template
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
@@ -45,14 +45,14 @@ def decode_config(token: str) -> dict:
 @app.get("/", response_class=HTMLResponse)
 async def root(request: Request):
     base = str(request.base_url).rstrip("/")
+    # Usa string.Template ($var) invece di str.format() per evitare
+    # conflitti con regex tipo [0-9A-F]{2} nel JS
     html = (STATIC_DIR / "config.html").read_text(encoding="utf-8")
-    # Inietta base URL, nome e logo come meta tag prima di </head>
-    meta_tags = (
-        f'<meta name="base" content="{base}">\n'
-        f'<meta name="logo" content="{ADDON_LOGO}">\n'
-        f'<meta name="aname" content="{ADDON_NAME}">\n'
+    html = Template(html).safe_substitute(
+        BASE=base,
+        ADDON_NAME=ADDON_NAME,
+        ADDON_LOGO=ADDON_LOGO,
     )
-    html = html.replace("</head>", meta_tags + "</head>", 1)
     return HTMLResponse(content=html)
 
 
