@@ -3,8 +3,6 @@ import sys
 from pathlib import Path
 from typing import Any
 
-# Fix import relativi per Vercel: aggiunge la cartella parent di api/ al path
-# in modo che "from api.config import ..." funzioni come package
 _root = Path(__file__).parent.parent
 if str(_root) not in sys.path:
     sys.path.insert(0, str(_root))
@@ -13,7 +11,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from api.config import ADDON_NAME, ADDON_LOGO, EASYPROXY_URL
+from api.config import ADDON_NAME, ADDON_LOGO, EASYPROXY_URL, MEDIAFLOW_URL
 from api.resolver import get_streams
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -37,21 +35,23 @@ def respond_with(data: Any) -> JSONResponse:
 @app.get("/")
 async def root(request: Request):
     base = str(request.base_url).rstrip("/")
+    proxy_mode = "easyproxy" if EASYPROXY_URL else ("mediaflow" if MEDIAFLOW_URL else "none")
     return respond_with({
         "status": "online",
         "addon": ADDON_NAME,
-        "easyproxy": bool(EASYPROXY_URL),
+        "proxy_mode": proxy_mode,
         "manifest": f"{base}/U0MQ/manifest.json",
     })
 
 
 @app.get("/U0MQ/manifest.json")
 async def manifest():
+    proxy_mode = "EasyProxy" if EASYPROXY_URL else ("MediaFlow" if MEDIAFLOW_URL else "no proxy")
     return respond_with({
         "id": "org.stremio.mammamia.ufo",
-        "version": "1.4.0",
+        "version": "1.5.0",
         "name": ADDON_NAME,
-        "description": "VixSrc via EasyProxy",
+        "description": f"VixSrc via {proxy_mode}",
         "logo": ADDON_LOGO,
         "resources": ["stream"],
         "types": ["movie", "series"],
