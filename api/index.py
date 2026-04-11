@@ -16,8 +16,8 @@ app = FastAPI(title=f"{ADDON_NAME} Addon")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
+    allow_credentials=False,  # NON combinare credentials=True con origins="*"
+    allow_methods=["GET", "OPTIONS"],
     allow_headers=["*"],
 )
 
@@ -28,228 +28,123 @@ def respond_with(data: Any) -> JSONResponse:
     return resp
 
 
-def encode_config(proxy_url: str, proxy_password: str) -> str:
-    cfg = json.dumps({"u": proxy_url.rstrip("/"), "p": proxy_password})
-    return base64.urlsafe_b64encode(cfg.encode()).decode().rstrip("=")
-
-
 def decode_config(token: str) -> dict:
-    pad = 4 - len(token) % 4
-    if pad != 4:
-        token += "=" * pad
+    """Decodifica il token base64url in dizionario {u, p}."""
+    # Ripristina padding
+    rem = len(token) % 4
+    if rem:
+        token += "=" * (4 - rem)
     try:
-        return json.loads(base64.urlsafe_b64decode(token).decode())
+        decoded = base64.urlsafe_b64decode(token).decode("utf-8")
+        return json.loads(decoded)
     except Exception:
-        raise HTTPException(status_code=400, detail="Configurazione non valida")
+        raise HTTPException(status_code=400, detail="Token di configurazione non valido")
 
 
-@app.get("/", response_class=HTMLResponse)
-async def root(request: Request):
-    base = str(request.base_url).rstrip("/")
-    return HTMLResponse(content=f"""
+CONFIG_PAGE = """
 <!DOCTYPE html>
 <html lang="it">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>{ADDON_NAME} - Configurazione</title>
+  <title>{name} - Configurazione</title>
   <style>
-    * {{ box-sizing: border-box; margin: 0; padding: 0; }}
-    body {{
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-      background: #0f0f13;
-      color: #e0e0e0;
-      min-height: 100vh;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      padding: 1rem;
-    }}
-    .card {{
-      background: #1a1a24;
-      border: 1px solid #2a2a3a;
-      border-radius: 12px;
-      padding: 2rem;
-      width: 100%;
-      max-width: 480px;
-    }}
-    .logo {{
-      width: 64px;
-      height: 64px;
-      border-radius: 12px;
-      margin: 0 auto 1rem;
-      display: block;
-    }}
-    h1 {{
-      text-align: center;
-      font-size: 1.4rem;
-      margin-bottom: 0.25rem;
-      color: #fff;
-    }}
-    .subtitle {{
-      text-align: center;
-      color: #888;
-      font-size: 0.85rem;
-      margin-bottom: 1.75rem;
-    }}
-    label {{
-      display: block;
-      font-size: 0.8rem;
-      color: #aaa;
-      margin-bottom: 0.35rem;
-      text-transform: uppercase;
-      letter-spacing: 0.05em;
-    }}
-    input {{
-      width: 100%;
-      background: #0f0f13;
-      border: 1px solid #2a2a3a;
-      border-radius: 8px;
-      padding: 0.65rem 0.85rem;
-      color: #e0e0e0;
-      font-size: 0.95rem;
-      margin-bottom: 1rem;
-      outline: none;
-      transition: border-color 0.2s;
-    }}
-    input:focus {{ border-color: #7c6af7; }}
-    button {{
-      width: 100%;
-      background: #7c6af7;
-      color: #fff;
-      border: none;
-      border-radius: 8px;
-      padding: 0.75rem;
-      font-size: 1rem;
-      font-weight: 600;
-      cursor: pointer;
-      transition: background 0.2s;
-    }}
-    button:hover {{ background: #6a59e0; }}
-    .result {{
-      display: none;
-      margin-top: 1.25rem;
-      background: #0f0f13;
-      border: 1px solid #2a2a3a;
-      border-radius: 8px;
-      padding: 1rem;
-    }}
-    .result p {{ font-size: 0.8rem; color: #888; margin-bottom: 0.5rem; }}
-    .link-row {{
-      display: flex;
-      gap: 0.5rem;
-      align-items: center;
-    }}
-    .link-box {{
-      flex: 1;
-      background: #1a1a24;
-      border: 1px solid #2a2a3a;
-      border-radius: 6px;
-      padding: 0.5rem 0.75rem;
-      font-size: 0.78rem;
-      color: #c0b8ff;
-      word-break: break-all;
-      cursor: pointer;
-      user-select: all;
-    }}
-    .copy-btn {{
-      width: auto;
-      padding: 0.5rem 0.85rem;
-      font-size: 0.8rem;
-      border-radius: 6px;
-      background: #2a2a3a;
-      flex-shrink: 0;
-    }}
-    .copy-btn:hover {{ background: #3a3a4a; }}
-    .install-btn {{
-      display: block;
-      margin-top: 0.75rem;
-      text-align: center;
-      background: #1db954;
-      color: #fff;
-      text-decoration: none;
-      border-radius: 8px;
-      padding: 0.65rem;
-      font-size: 0.9rem;
-      font-weight: 600;
-    }}
-    .install-btn:hover {{ background: #17a349; }}
+    *{{box-sizing:border-box;margin:0;padding:0}}
+    body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#0f0f13;color:#e0e0e0;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:1rem}}
+    .card{{background:#1a1a24;border:1px solid #2a2a3a;border-radius:12px;padding:2rem;width:100%;max-width:480px}}
+    .logo{{width:64px;height:64px;border-radius:12px;margin:0 auto 1rem;display:block}}
+    h1{{text-align:center;font-size:1.4rem;margin-bottom:.25rem;color:#fff}}
+    .sub{{text-align:center;color:#888;font-size:.85rem;margin-bottom:1.75rem}}
+    label{{display:block;font-size:.8rem;color:#aaa;margin-bottom:.35rem;text-transform:uppercase;letter-spacing:.05em}}
+    input{{width:100%;background:#0f0f13;border:1px solid #2a2a3a;border-radius:8px;padding:.65rem .85rem;color:#e0e0e0;font-size:.95rem;margin-bottom:1rem;outline:none;transition:border-color .2s}}
+    input:focus{{border-color:#7c6af7}}
+    button{{width:100%;background:#7c6af7;color:#fff;border:none;border-radius:8px;padding:.75rem;font-size:1rem;font-weight:600;cursor:pointer;transition:background .2s}}
+    button:hover{{background:#6a59e0}}
+    .result{{display:none;margin-top:1.25rem;background:#0f0f13;border:1px solid #2a2a3a;border-radius:8px;padding:1rem}}
+    .result p{{font-size:.8rem;color:#888;margin-bottom:.5rem}}
+    .link-row{{display:flex;gap:.5rem;align-items:center}}
+    .link-box{{flex:1;background:#1a1a24;border:1px solid #2a2a3a;border-radius:6px;padding:.5rem .75rem;font-size:.75rem;color:#c0b8ff;word-break:break-all;cursor:pointer;user-select:all}}
+    .copy-btn{{width:auto;padding:.5rem .85rem;font-size:.8rem;border-radius:6px;background:#2a2a3a;flex-shrink:0}}
+    .copy-btn:hover{{background:#3a3a4a}}
+    .install-btn{{display:block;margin-top:.75rem;text-align:center;background:#1db954;color:#fff;text-decoration:none;border-radius:8px;padding:.65rem;font-size:.9rem;font-weight:600}}
+    .install-btn:hover{{background:#17a349}}
+    .note{{margin-top:.75rem;font-size:.75rem;color:#666;text-align:center}}
   </style>
 </head>
 <body>
   <div class="card">
-    <img class="logo" src="{ADDON_LOGO}" alt="UFO">
-    <h1>{ADDON_NAME}</h1>
-    <p class="subtitle">Inserisci il tuo proxy MediaFlow per generare il manifest</p>
-
-    <label for="proxy_url">URL del proxy (MediaFlow / EasyProxy)</label>
-    <input id="proxy_url" type="url" placeholder="https://mio-proxy.vercel.app" />
-
-    <label for="proxy_psw">Password del proxy (opzionale)</label>
-    <input id="proxy_psw" type="password" placeholder="lascia vuoto se non richiesta" />
-
-    <button onclick="generate()">Genera manifest</button>
-
-    <div class="result" id="result">
-      <p>Copia questo link e installalo in Stremio:</p>
+    <img class="logo" src="{logo}" alt="UFO">
+    <h1>{name}</h1>
+    <p class="sub">Inserisci il tuo proxy MediaFlow per generare il manifest Stremio</p>
+    <label for="pu">URL proxy (MediaFlow / EasyProxy)</label>
+    <input id="pu" type="url" placeholder="https://mio-proxy.vercel.app" />
+    <label for="pp">Password proxy (opzionale)</label>
+    <input id="pp" type="password" placeholder="lascia vuoto se non richiesta" />
+    <button onclick="gen()">Genera manifest</button>
+    <div class="result" id="res">
+      <p>Link manifest da installare in Stremio:</p>
       <div class="link-row">
-        <div class="link-box" id="manifest_link"></div>
-        <button class="copy-btn" onclick="copyLink()">Copia</button>
+        <div class="link-box" id="mlink"></div>
+        <button class="copy-btn" onclick="cp()">Copia</button>
       </div>
-      <a class="install-btn" id="install_link" href="#" target="_blank">&#9654; Installa in Stremio</a>
+      <a class="install-btn" id="ilink" href="#">&#9654; Installa in Stremio</a>
+      <p class="note">Oppure incolla il link in Stremio → Addon → Installa da URL</p>
     </div>
   </div>
-
   <script>
-    const BASE = "{base}";
-
-    function b64url(str) {{
-      const bytes = new TextEncoder().encode(str);
-      let bin = "";
-      bytes.forEach(b => bin += String.fromCharCode(b));
-      return btoa(bin).replace(/\\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+    const BASE="{base}";
+    function b64u(s){{
+      // Encode UTF-8 string → base64url senza padding
+      const b=btoa(encodeURIComponent(s).replace(/%([0-9A-F]{{2}})/g,(_,p)=>String.fromCharCode('0x'+p)));
+      return b.replace(/\\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
     }}
-
-    function generate() {{
-      const url = document.getElementById("proxy_url").value.trim().replace(/\/+$/, "");
-      const psw = document.getElementById("proxy_psw").value.trim();
-      if (!url) {{ alert("Inserisci l'URL del proxy"); return; }}
-      const cfg = JSON.stringify({{u: url, p: psw}});
-      const token = b64url(cfg);
-      const manifest = BASE + "/" + token + "/manifest.json";
-      const stremio  = manifest.replace(/^https?/, "stremio");
-      document.getElementById("manifest_link").textContent = manifest;
-      document.getElementById("install_link").href = stremio;
-      document.getElementById("result").style.display = "block";
+    function gen(){{
+      const u=document.getElementById('pu').value.trim().replace(/\/+$/,'');
+      const p=document.getElementById('pp').value.trim();
+      if(!u){{alert('Inserisci l\'URL del proxy');return;}}
+      const tok=b64u(JSON.stringify({{u,p}}));
+      const mf=BASE+'/'+tok+'/manifest.json';
+      document.getElementById('mlink').textContent=mf;
+      document.getElementById('ilink').href=mf.replace(/^https?/,'stremio');
+      document.getElementById('res').style.display='block';
     }}
-
-    function copyLink() {{
-      const txt = document.getElementById("manifest_link").textContent;
-      navigator.clipboard.writeText(txt).then(() => {{
-        const btn = document.querySelector(".copy-btn");
-        btn.textContent = "Copiato!";
-        setTimeout(() => btn.textContent = "Copia", 1500);
-      }});
+    function cp(){{
+      navigator.clipboard.writeText(document.getElementById('mlink').textContent)
+        .then(()=>{{const b=document.querySelector('.copy-btn');b.textContent='Copiato!';setTimeout(()=>b.textContent='Copia',1500)}});
     }}
   </script>
 </body>
 </html>
-""")
+"""
+
+
+@app.get("/", response_class=HTMLResponse)
+async def root(request: Request):
+    base = str(request.base_url).rstrip("/")
+    return HTMLResponse(content=CONFIG_PAGE.format(
+        name=ADDON_NAME,
+        logo=ADDON_LOGO,
+        base=base,
+    ))
 
 
 @app.get("/{token}/manifest.json")
 async def manifest(token: str):
     cfg = decode_config(token)
+    proxy_url = cfg.get("u", "")
     return respond_with({
-        "id": f"org.stremio.ufo.{token[:8]}",
+        "id": f"org.stremio.ufo.{token[:12]}",
         "version": "2.0.0",
         "name": ADDON_NAME,
-        "description": f"VixSrc via proxy: {cfg.get('u', '')}",
+        "description": f"VixSrc via {proxy_url or 'proxy'}",
         "logo": ADDON_LOGO,
         "resources": ["stream"],
         "types": ["movie", "series"],
         "catalogs": [],
-        "behaviorHints": {"configurable": True, "configurationRequired": False},
+        "behaviorHints": {
+            "configurable": False,
+            "configurationRequired": False,
+        },
     })
 
 
@@ -261,10 +156,11 @@ async def streams_route(token: str, type: str, id: str):
     proxy_url = cfg.get("u", "")
     proxy_psw = cfg.get("p", "")
     if not proxy_url:
-        raise HTTPException(status_code=400, detail="Proxy URL mancante nella configurazione")
+        raise HTTPException(status_code=400, detail="Proxy URL mancante")
     try:
         data = await get_streams(id, type, proxy_url, proxy_psw)
-    except Exception:
+    except Exception as e:
+        logging.error(f"streams error: {e}")
         data = {"streams": []}
     return respond_with(data)
 
