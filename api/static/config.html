@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>UFO - Configurazione</title>
+  <style>
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#0f0f13;color:#e0e0e0;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:1rem}
+    .card{background:#1a1a24;border:1px solid #2a2a3a;border-radius:12px;padding:2rem;width:100%;max-width:480px}
+    .logo{width:64px;height:64px;border-radius:12px;margin:0 auto 1rem;display:block}
+    h1{text-align:center;font-size:1.4rem;margin-bottom:.25rem;color:#fff}
+    .sub{text-align:center;color:#888;font-size:.85rem;margin-bottom:1.75rem}
+    label{display:block;font-size:.8rem;color:#aaa;margin-bottom:.35rem;text-transform:uppercase;letter-spacing:.05em}
+    input{width:100%;background:#0f0f13;border:1px solid #2a2a3a;border-radius:8px;padding:.65rem .85rem;color:#e0e0e0;font-size:.95rem;margin-bottom:1rem;outline:none;transition:border-color .2s}
+    input:focus{border-color:#7c6af7}
+    button{width:100%;background:#7c6af7;color:#fff;border:none;border-radius:8px;padding:.75rem;font-size:1rem;font-weight:600;cursor:pointer;transition:background .2s}
+    button:hover{background:#6a59e0}
+    .result{display:none;margin-top:1.25rem;background:#0f0f13;border:1px solid #2a2a3a;border-radius:8px;padding:1rem}
+    .result p{font-size:.8rem;color:#888;margin-bottom:.5rem}
+    .link-row{display:flex;gap:.5rem;align-items:center}
+    .link-box{flex:1;background:#1a1a24;border:1px solid #2a2a3a;border-radius:6px;padding:.5rem .75rem;font-size:.75rem;color:#c0b8ff;word-break:break-all;cursor:pointer;user-select:all}
+    .copy-btn{width:auto;padding:.5rem .85rem;font-size:.8rem;border-radius:6px;background:#2a2a3a;flex-shrink:0}
+    .copy-btn:hover{background:#3a3a4a}
+    .install-btn{display:block;margin-top:.75rem;text-align:center;background:#1db954;color:#fff;text-decoration:none;border-radius:8px;padding:.65rem;font-size:.9rem;font-weight:600}
+    .install-btn:hover{background:#17a349}
+    .note{margin-top:.75rem;font-size:.75rem;color:#666;text-align:center}
+  </style>
+</head>
+<body>
+  <div class="card">
+    <img class="logo" id="logo" src="" alt="UFO">
+    <h1 id="aname"></h1>
+    <p class="sub">Inserisci il tuo proxy MediaFlow per generare il manifest Stremio</p>
+    <label for="pu">URL proxy (MediaFlow / EasyProxy)</label>
+    <input id="pu" type="url" placeholder="https://mio-proxy.vercel.app" />
+    <label for="pp">Password proxy (opzionale)</label>
+    <input id="pp" type="password" placeholder="lascia vuoto se non richiesta" />
+    <button onclick="gen()">Genera manifest</button>
+    <div class="result" id="res">
+      <p>Link manifest da installare in Stremio:</p>
+      <div class="link-row">
+        <div class="link-box" id="mlink"></div>
+        <button class="copy-btn" onclick="cp()">Copia</button>
+      </div>
+      <a class="install-btn" id="ilink" href="#">&#9654; Installa in Stremio</a>
+      <p class="note">Oppure incolla il link: Stremio &rarr; Addon &rarr; Installa da URL</p>
+    </div>
+  </div>
+  <script>
+    // Legge nome/logo iniettati dal server come meta tag
+    const BASE = document.querySelector('meta[name="base"]').content;
+    document.getElementById('logo').src = document.querySelector('meta[name="logo"]').content;
+    document.getElementById('aname').textContent = document.querySelector('meta[name="aname"]').content;
+
+    function b64u(s) {
+      // btoa sicuro per UTF-8
+      const bytes = new TextEncoder().encode(s);
+      let bin = '';
+      bytes.forEach(b => bin += String.fromCharCode(b));
+      return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    }
+
+    function gen() {
+      const u = document.getElementById('pu').value.trim().replace(/\/+$/, '');
+      const p = document.getElementById('pp').value.trim();
+      if (!u) { alert('Inserisci l\'URL del proxy'); return; }
+      const tok = b64u(JSON.stringify({u, p}));
+      const mf = BASE + '/' + tok + '/manifest.json';
+      document.getElementById('mlink').textContent = mf;
+      document.getElementById('ilink').href = mf.replace(/^https?/, 'stremio');
+      document.getElementById('res').style.display = 'block';
+    }
+
+    function cp() {
+      navigator.clipboard.writeText(document.getElementById('mlink').textContent)
+        .then(() => {
+          const b = document.querySelector('.copy-btn');
+          b.textContent = 'Copiato!';
+          setTimeout(() => b.textContent = 'Copia', 1500);
+        });
+    }
+  </script>
+</body>
+</html>
