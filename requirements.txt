@@ -2,4 +2,3 @@ fastapi
 httpx
 uvicorn
 python-dotenv
-mangum

@@ -1,34 +1,23 @@
-import base64
-import json
 import logging
-import sys
-from pathlib import Path
 from typing import Any
 
-# Aggiunge api/ al path PRIMA di qualsiasi altro import
-sys.path.insert(0, str(Path(__file__).parent))
-
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from mangum import Mangum
 
-import config as cfg
-from resolver import get_streams
+from .config import ADDON_NAME, ADDON_LOGO, EASYPROXY_URL
+from .resolver import get_streams
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
-app = FastAPI(title=f"{cfg.ADDON_NAME} Addon")
+app = FastAPI(title=f"{ADDON_NAME} Addon")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=False,
-    allow_methods=["GET", "OPTIONS"],
+    allow_credentials=True,
+    allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# Vercel ASGI handler
-handler = Mangum(app, lifespan="off")
 
 
 def respond_with(data: Any) -> JSONResponse:
@@ -37,43 +26,48 @@ def respond_with(data: Any) -> JSONResponse:
     return resp
 
 
-@app.get("/manifest.json")
-async def manifest():
+@app.get("/")
+async def root(request: Request):
+    base = str(request.base_url).rstrip("/")
     return respond_with({
-        "id": "org.stremio.ufo",
-        "version": "2.0.0",
-        "name": cfg.ADDON_NAME,
-        "description": "Stream da VixSrc via MediaFlow proxy",
-        "logo": cfg.ADDON_LOGO,
-        "resources": ["stream"],
-        "types": ["movie", "series"],
-        "catalogs": [],
-        "behaviorHints": {
-            "configurable": False,
-            "configurationRequired": False,
-        },
+        "status": "online",
+        "addon": ADDON_NAME,
+        "easyproxy": bool(EASYPROXY_URL),
+        "manifest": f"{base}/U0MQ/manifest.json",
     })
 
 
-@app.get("/stream/{type}/{id}.json")
+@app.get("/U0MQ/manifest.json")
+async def manifest():
+    return respond_with({
+        "id": "org.stremio.mammamia.ufo",
+        "version": "1.4.0",
+        "name": ADDON_NAME,
+        "description": "VixSrc via EasyProxy",
+        "logo": ADDON_LOGO,
+        "resources": ["stream"],
+        "types": ["movie", "series"],
+        "catalogs": [],
+        "behaviorHints": {"configurable": False},
+    })
+
+
+@app.get("/U0MQ/stream/{type}/{id}.json")
 async def streams_route(type: str, id: str):
     if type not in ("movie", "series"):
         raise HTTPException(status_code=404)
-    if not cfg.PROXY_URL:
-        raise HTTPException(status_code=500, detail="PROXY_URL non configurato")
     try:
-        data = await get_streams(id, type, cfg.PROXY_URL, cfg.PROXY_PSW)
-    except Exception as e:
-        logging.error(f"streams error: {e}")
+        data = await get_streams(id, type)
+    except Exception:
         data = {"streams": []}
     return respond_with(data)
 
 
-@app.get("/meta/{type}/{id}.json")
+@app.get("/U0MQ/meta/{type}/{id}.json")
 async def meta(type: str, id: str):
-    return respond_with({"meta": {"id": id, "type": type, "name": cfg.ADDON_NAME}})
+    return respond_with({"meta": {"id": id, "type": type, "name": ADDON_NAME, "poster": ADDON_LOGO}})
 
 
-@app.get("/catalog/{type}/{id}.json")
+@app.get("/U0MQ/catalog/{type}/{id}.json")
 async def catalog(type: str, id: str):
     return respond_with({"metas": []})
