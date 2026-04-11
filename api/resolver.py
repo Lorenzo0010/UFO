@@ -2,8 +2,10 @@ import re
 import logging
 from typing import Dict, Optional
 from urllib.parse import quote, urljoin, urlparse
+import urllib.parse
 
-import httpx
+from curl_cffi.requests import AsyncSession
+from bs4 import BeautifulSoup, SoupStrainer
 
 from .config import (
     SC_DOMAIN, USER_AGENT,
@@ -18,144 +20,65 @@ BROWSER_HEADERS = {
     "User-Agent": USER_AGENT,
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "en-US,en;q=0.5",
-    "Referer": SC_DOMAIN,
+    "Referer": SC_DOMAIN + "/",
     "Origin": SC_DOMAIN,
 }
 
-# --- Pattern per trovare .m3u8 nell'HTML ---
-_M3U8_PATTERNS = [
-    re.compile(r'(?:source|file|src)\s*:\s*["\']([^"\']+ \.m3u8[^"\']* )["\']', re.VERBOSE),
-    re.compile(r'["\']([^"\']+ \.m3u8[^"\']* )["\']', re.VERBOSE),
-    re.compile(r'(https?://[^\s"\' <>]+\.m3u8[^\s"\' <>]*)'),
-]
 
-# Pattern per trovare src di iframe
-_IFRAME_RE = re.compile(r'<iframe[^>]+src=["\']([^"\' >]+)["\']', re.IGNORECASE)
-
-# Pattern per trovare chiamate API VixSrc nei JS inline
-# VixSrc di solito chiama /api/source/<id> o /api/episode/<id>
-_API_RE = re.compile(r'(?:fetch|axios|XMLHttpRequest)[^;\n]*["\']([^"\' ]+/api/[^"\' ]+)["\']')
-_SOURCE_ID_RE = re.compile(r'/(?:tv|movie)/(\d+)')
-
-
-def _find_m3u8_in_html(html: str) -> Optional[str]:
-    """Cerca il primo URL .m3u8 valido nell'HTML usando i pattern definiti."""
-    for pattern in _M3U8_PATTERNS:
-        m = pattern.search(html)
-        if m:
-            url = m.group(1).strip()
-            if url.startswith("http"):
-                return url
-    return None
-
-
-async def _fetch_html(client: httpx.AsyncClient, url: str, referer: str = SC_DOMAIN) -> Optional[str]:
-    """Scarica una pagina e restituisce l'HTML, oppure None in caso di errore."""
-    try:
-        headers = {**BROWSER_HEADERS, "Referer": referer}
-        resp = await client.get(url, headers=headers)
-        resp.raise_for_status()
-        return resp.text
-    except Exception as e:
-        logger.warning(f"fetch fallito per {url}: {e}")
-        return None
-
-
-async def _try_vixsrc_api(client: httpx.AsyncClient, page_url: str, html: str) -> Optional[str]:
+async def extract_vixsrc_stream(page_url: str) -> Optional[str]:
     """
-    Step 3: prova le API interne di VixSrc.
-    VixSrc espone endpoint del tipo:
-      /api/source/<id>        -> POST, risponde con {data: [{file, label}]}
-      /api/episode/<id>       -> GET, risponde con {source: [{file}]}
-    Estrae l'ID dal path della pagina e prova entrambi.
+    Estrae il vero URL dello stream da VixSrc usando la stessa tecnica di MammaMia:
+    legge token, expires e server_url dallo script inline della pagina.
     """
-    base = f"{urlparse(page_url).scheme}://{urlparse(page_url).netloc}"
+    async with AsyncSession() as client:
+        try:
+            headers = {**BROWSER_HEADERS, "Referer": SC_DOMAIN + "/"}
+            resp = await client.get(page_url, headers=headers)
+            if resp.status_code != 200:
+                logger.warning(f"VixSrc fetch fallito: {resp.status_code} per {page_url}")
+                return None
 
-    # Cerca ID numerico nella URL della pagina
-    id_match = _SOURCE_ID_RE.search(page_url)
-    if not id_match:
-        return None
-    content_id = id_match.group(1)
+            soup = BeautifulSoup(resp.text, "lxml", parse_only=SoupStrainer("body"))
+            if not soup:
+                return None
 
-    # Prova l'endpoint /api/source/<id> via POST (pattern comune VixSrc/SuperEmbed)
-    api_url = f"{base}/api/source/{content_id}"
-    try:
-        resp = await client.post(
-            api_url,
-            headers={**BROWSER_HEADERS, "Referer": page_url, "X-Requested-With": "XMLHttpRequest"},
-            data={"r": page_url, "d": urlparse(page_url).netloc},
-        )
-        if resp.status_code == 200:
-            data = resp.json()
-            # Formato: {"success": true, "data": [{"file": "...", "label": "720p"}]}
-            sources = data.get("data") or data.get("source") or []
-            for src in sources:
-                f = src.get("file") or src.get("src") or ""
-                if ".m3u8" in f:
-                    logger.info(f"✅ m3u8 da API VixSrc ({api_url}): {f[:80]}")
-                    return f
-    except Exception as e:
-        logger.debug(f"API VixSrc POST fallita: {e}")
+            script_tag = soup.find("body").find("script")
+            if not script_tag:
+                logger.warning("Nessun <script> trovato nel body")
+                return None
 
-    # Prova endpoint /api/episode/<id> via GET
-    api_url2 = f"{base}/api/episode/{content_id}"
-    try:
-        resp = await client.get(
-            api_url2,
-            headers={**BROWSER_HEADERS, "Referer": page_url, "X-Requested-With": "XMLHttpRequest"},
-        )
-        if resp.status_code == 200:
-            data = resp.json()
-            sources = data.get("source") or data.get("data") or []
-            for src in (sources if isinstance(sources, list) else [sources]):
-                f = src.get("file") or src.get("src") or ""
-                if ".m3u8" in f:
-                    logger.info(f"✅ m3u8 da API VixSrc ({api_url2}): {f[:80]}")
-                    return f
-    except Exception as e:
-        logger.debug(f"API VixSrc GET fallita: {e}")
+            script = script_tag.text
 
-    return None
+            token_m   = re.search(r"'token':\s*'(\w+)'", script)
+            expires_m = re.search(r"'expires':\s*'(\d+)'", script)
+            server_m  = re.search(r"url:\s*'([^']+)'", script)
 
+            if not (token_m and expires_m and server_m):
+                logger.warning("Token/expires/server_url non trovati nello script")
+                return None
 
-async def extract_m3u8_from_vixsrc(page_url: str) -> Optional[str]:
-    """
-    Estrazione multi-step dell'URL .m3u8 da VixSrc:
-      Step 1 - HTML diretto: cerca .m3u8 nell'HTML della pagina principale
-      Step 2 - Iframe:       segue i src degli iframe trovati e cerca .m3u8
-      Step 3 - API interna:  chiama /api/source/<id> e /api/episode/<id>
-    """
-    async with httpx.AsyncClient(follow_redirects=True, timeout=20) as client:
+            token      = token_m.group(1)
+            expires    = expires_m.group(1)
+            server_url = server_m.group(1)
 
-        # STEP 1: HTML diretto
-        logger.info(f"🔍 Step 1 - fetch HTML: {page_url}")
-        html = await _fetch_html(client, page_url)
-        if html:
-            m3u8 = _find_m3u8_in_html(html)
-            if m3u8:
-                logger.info(f"✅ Step 1 trovato: {m3u8[:80]}")
-                return m3u8
+            if "?b=1" in server_url:
+                final_url = f"{server_url}&token={token}&expires={expires}"
+            else:
+                final_url = f"{server_url}?token={token}&expires={expires}"
 
-            # STEP 2: iframe
-            iframes = _IFRAME_RE.findall(html)
-            for iframe_src in iframes[:3]:  # max 3 iframe
-                iframe_url = iframe_src if iframe_src.startswith("http") else urljoin(page_url, iframe_src)
-                logger.info(f"🔍 Step 2 - iframe: {iframe_url[:80]}")
-                iframe_html = await _fetch_html(client, iframe_url, referer=page_url)
-                if iframe_html:
-                    m3u8 = _find_m3u8_in_html(iframe_html)
-                    if m3u8:
-                        logger.info(f"✅ Step 2 trovato in iframe: {m3u8[:80]}")
-                        return m3u8
+            if "window.canPlayFHD = true" in script:
+                final_url += "&h=1"
 
-            # STEP 3: API interna VixSrc
-            logger.info(f"🔍 Step 3 - API VixSrc")
-            m3u8 = await _try_vixsrc_api(client, page_url, html)
-            if m3u8:
-                return m3u8
+            # Aggiungi estensione .m3u8 come fa MammaMia
+            parts = final_url.split("?")
+            final_url = parts[0] + ".m3u8" + "?" + parts[1]
 
-    logger.warning(f"⚠️ Nessun .m3u8 trovato con tutti i metodi per: {page_url}")
-    return None
+            logger.info(f"✅ VixSrc stream estratto: {final_url[:80]}")
+            return final_url
+
+        except Exception as e:
+            logger.error(f"❌ extract_vixsrc_stream error: {e}")
+            return None
 
 
 def build_easyproxy_url(vixsrc_page_url: str) -> str:
@@ -166,12 +89,34 @@ def build_easyproxy_url(vixsrc_page_url: str) -> str:
     return url
 
 
-def build_mediaflow_url(m3u8_url: str) -> str:
-    encoded = quote(m3u8_url, safe="")
-    url = f"{MEDIAFLOW_URL}/proxy/hls/manifest.m3u8?d={encoded}"
-    if MEDIAFLOW_PSW:
-        url += f"&api_password={quote(MEDIAFLOW_PSW, safe='')}"
-    return url
+async def build_mediaflow_url(m3u8_url: str, page_url: str) -> Optional[str]:
+    """
+    Costruisce l'URL MediaFlow Proxy usando l'endpoint /extractor/video
+    esattamente come fa MammaMia (mfp.py: build_mfp + transform_mfp).
+    """
+    mfp_url = f"{MEDIAFLOW_URL}/extractor/video?api_password={quote(MEDIAFLOW_PSW, safe='')}&d={quote(m3u8_url, safe='')}&host=VixCloud&redirect_stream=false"
+    try:
+        async with AsyncSession() as client:
+            resp = await client.get(mfp_url)
+            data = resp.json()
+            url = (
+                data["mediaflow_proxy_url"]
+                + "?api_password=" + data["query_params"]["api_password"]
+                + "&d=" + urllib.parse.quote(data["destination_url"])
+            )
+            for key, val in data.get("request_headers", {}).items():
+                url += f"&h_{key}={urllib.parse.quote(val)}"
+            logger.info(f"✅ MediaFlow URL costruito: {url[:80]}")
+            return url
+    except Exception as e:
+        logger.warning(f"build_mediaflow_url fallito, fallback diretto: {e}")
+        # Fallback: costruzione manuale con header Referer
+        encoded = quote(m3u8_url, safe="")
+        url = f"{MEDIAFLOW_URL}/proxy/hls/manifest.m3u8?d={encoded}"
+        if MEDIAFLOW_PSW:
+            url += f"&api_password={quote(MEDIAFLOW_PSW, safe='')}"
+        url += f"&h_Referer={quote(page_url, safe='')}&h_Origin={quote(SC_DOMAIN, safe='')}&h_User-Agent={quote(USER_AGENT, safe='')}"
+        return url
 
 
 async def get_streams(stremio_id: str, content_type: str) -> Dict:
@@ -195,10 +140,10 @@ async def get_streams(stremio_id: str, content_type: str) -> Dict:
         )
         logger.info(f"🎬 VixSrc page: {page_url}")
 
-        # ===== PRIORITA' 1: EasyProxy (se EASYPROXY_URL e' impostato) =====
+        # ===== PRIORITA' 1: EasyProxy =====
         if EASYPROXY_URL:
             stream_url = build_easyproxy_url(page_url)
-            logger.info(f"✅ EasyProxy stream: {stream_url[:80]}...")
+            logger.info(f"✅ EasyProxy stream: {stream_url[:80]}")
             result["streams"].append({
                 "name": "🛸 UFO",
                 "title": "VixSrc • EasyProxy",
@@ -210,26 +155,47 @@ async def get_streams(stremio_id: str, content_type: str) -> Dict:
             })
             return result
 
-        # ===== PRIORITA' 2: MediaFlow Proxy con estrazione m3u8 multi-step =====
+        # ===== PRIORITA' 2: MediaFlow Proxy =====
         if MEDIAFLOW_URL:
-            m3u8_url = await extract_m3u8_from_vixsrc(page_url)
+            m3u8_url = await extract_vixsrc_stream(page_url)
             if m3u8_url:
-                stream_url = build_mediaflow_url(m3u8_url)
-                logger.info(f"✅ MediaFlow stream: {stream_url[:80]}...")
-                result["streams"].append({
-                    "name": "🛸 UFO",
-                    "title": "VixSrc • MediaFlow",
-                    "url": stream_url,
-                    "behaviorHints": {
-                        "notWebReady": False,
-                        "bingeGroup": "ufo-sc",
-                    },
-                })
+                stream_url = await build_mediaflow_url(m3u8_url, page_url)
+                if stream_url:
+                    logger.info(f"✅ MediaFlow stream: {stream_url[:80]}")
+                    result["streams"].append({
+                        "name": "🛸 UFO",
+                        "title": "VixSrc • MediaFlow",
+                        "url": stream_url,
+                        "behaviorHints": {
+                            "notWebReady": False,
+                            "bingeGroup": "ufo-sc",
+                        },
+                    })
             else:
-                logger.error("❌ Impossibile estrarre m3u8 da VixSrc (tutti i metodi falliti)")
+                logger.error("❌ Impossibile estrarre stream da VixSrc")
             return result
 
-        logger.error("❌ Nessun proxy configurato: imposta EASYPROXY_URL o MEDIAFLOW_URL")
+        # ===== NESSUN PROXY: stream diretto (potrebbe non funzionare fuori LAN) =====
+        m3u8_url = await extract_vixsrc_stream(page_url)
+        if m3u8_url:
+            result["streams"].append({
+                "name": "🛸 UFO",
+                "title": "VixSrc • Diretto",
+                "url": m3u8_url,
+                "behaviorHints": {
+                    "notWebReady": True,
+                    "proxyHeaders": {
+                        "request": {
+                            "User-Agent": USER_AGENT,
+                            "Referer": page_url,
+                            "Origin": SC_DOMAIN,
+                        }
+                    },
+                    "bingeGroup": "ufo-sc",
+                },
+            })
+        else:
+            logger.error("❌ Nessun proxy configurato e stream diretto fallito")
 
     except Exception as e:
         logger.error(f"❌ get_streams error: {e}")

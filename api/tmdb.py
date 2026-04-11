@@ -1,7 +1,7 @@
 import logging
 from typing import Optional
 
-import httpx
+from curl_cffi.requests import AsyncSession
 
 from .config import TMDB_API_KEY
 
@@ -16,7 +16,7 @@ async def get_tmdb_id(content_id: str, content_type: str) -> Optional[int]:
         except ValueError:
             return None
     try:
-        async with httpx.AsyncClient(timeout=10) as client:
+        async with AsyncSession() as client:
             r = await client.get(
                 f"https://api.themoviedb.org/3/find/{content_id}",
                 params={
@@ -34,5 +34,5 @@ async def get_tmdb_id(content_id: str, content_type: str) -> Optional[int]:
                 if data.get(fallback):
                     return data[fallback][0]["id"]
     except Exception as e:
-        logger.error(f"\u274c TMDb error: {e}")
+        logger.error(f"❌ TMDb error: {e}")
     return None

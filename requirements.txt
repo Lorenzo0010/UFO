@@ -1,4 +1,6 @@
 fastapi
-httpx
+curl_cffi
 uvicorn
 python-dotenv
+beautifulsoup4
+lxml
