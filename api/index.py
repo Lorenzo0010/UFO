@@ -11,7 +11,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from api.config import ADDON_NAME, ADDON_LOGO, EASYPROXY_URL, MEDIAFLOW_URL
+from api.config import ADDON_NAME, ADDON_LOGO
 from api.resolver import get_streams
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -35,23 +35,21 @@ def respond_with(data: Any) -> JSONResponse:
 @app.get("/")
 async def root(request: Request):
     base = str(request.base_url).rstrip("/")
-    proxy_mode = "easyproxy" if EASYPROXY_URL else ("mediaflow" if MEDIAFLOW_URL else "none")
     return respond_with({
         "status": "online",
         "addon": ADDON_NAME,
-        "proxy_mode": proxy_mode,
+        "proxy_mode": "none",
         "manifest": f"{base}/U0MQ/manifest.json",
     })
 
 
 @app.get("/U0MQ/manifest.json")
 async def manifest():
-    proxy_mode = "EasyProxy" if EASYPROXY_URL else ("MediaFlow" if MEDIAFLOW_URL else "no proxy")
     return respond_with({
         "id": "org.stremio.mammamia.ufo",
-        "version": "1.6.0",
+        "version": "1.7.0",
         "name": ADDON_NAME,
-        "description": f"VixSrc via {proxy_mode}",
+        "description": "VixSrc • stream diretto (no proxy)",
         "logo": ADDON_LOGO,
         "resources": [
             {
@@ -77,7 +75,6 @@ async def streams_route(type: str, id: str):
         data = await get_streams(id, type)
     except Exception:
         data = {"streams": []}
-    # cacheMaxAge=0 forza Stremio a non cachare i token VixSrc (scadono in ~10 min)
     data["cacheMaxAge"] = 0
     data["staleRevalidate"] = 0
     data["staleError"] = 0

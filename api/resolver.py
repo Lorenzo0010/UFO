@@ -1,17 +1,12 @@
 import re
 import logging
 from typing import Dict, Optional
-from urllib.parse import quote, urljoin, urlparse
-import urllib.parse
+from urllib.parse import quote
 
 from curl_cffi.requests import AsyncSession
 from bs4 import BeautifulSoup, SoupStrainer
 
-from .config import (
-    SC_DOMAIN, USER_AGENT,
-    EASYPROXY_URL, EASYPROXY_PSW,
-    MEDIAFLOW_URL, MEDIAFLOW_PSW,
-)
+from .config import SC_DOMAIN, USER_AGENT
 from .tmdb import get_tmdb_id
 
 logger = logging.getLogger(__name__)
@@ -27,8 +22,8 @@ BROWSER_HEADERS = {
 
 async def extract_vixsrc_stream(page_url: str) -> Optional[str]:
     """
-    Estrae il vero URL dello stream da VixSrc usando la stessa tecnica di MammaMia:
-    legge token, expires e server_url dallo script inline della pagina.
+    Estrae il vero URL dello stream da VixSrc leggendo token, expires
+    e server_url dallo script inline della pagina.
     """
     async with AsyncSession() as client:
         try:
@@ -69,7 +64,6 @@ async def extract_vixsrc_stream(page_url: str) -> Optional[str]:
             if "window.canPlayFHD = true" in script:
                 final_url += "&h=1"
 
-            # Aggiungi estensione .m3u8 come fa MammaMia
             parts = final_url.split("?")
             final_url = parts[0] + ".m3u8" + "?" + parts[1]
 
@@ -79,44 +73,6 @@ async def extract_vixsrc_stream(page_url: str) -> Optional[str]:
         except Exception as e:
             logger.error(f"❌ extract_vixsrc_stream error: {e}")
             return None
-
-
-def build_easyproxy_url(vixsrc_page_url: str) -> str:
-    encoded = quote(vixsrc_page_url, safe="")
-    url = f"{EASYPROXY_URL}/proxy/hls/manifest.m3u8?d={encoded}"
-    if EASYPROXY_PSW:
-        url += f"&api_password={quote(EASYPROXY_PSW, safe='')}"
-    return url
-
-
-async def build_mediaflow_url(m3u8_url: str, page_url: str) -> Optional[str]:
-    """
-    Costruisce l'URL MediaFlow Proxy usando l'endpoint /extractor/video
-    esattamente come fa MammaMia (mfp.py: build_mfp + transform_mfp).
-    """
-    mfp_url = f"{MEDIAFLOW_URL}/extractor/video?api_password={quote(MEDIAFLOW_PSW, safe='')}&d={quote(m3u8_url, safe='')}&host=VixCloud&redirect_stream=false"
-    try:
-        async with AsyncSession() as client:
-            resp = await client.get(mfp_url)
-            data = resp.json()
-            url = (
-                data["mediaflow_proxy_url"]
-                + "?api_password=" + data["query_params"]["api_password"]
-                + "&d=" + urllib.parse.quote(data["destination_url"])
-            )
-            for key, val in data.get("request_headers", {}).items():
-                url += f"&h_{key}={urllib.parse.quote(val)}"
-            logger.info(f"✅ MediaFlow URL costruito: {url[:80]}")
-            return url
-    except Exception as e:
-        logger.warning(f"build_mediaflow_url fallito, fallback diretto: {e}")
-        # Fallback: costruzione manuale con header Referer
-        encoded = quote(m3u8_url, safe="")
-        url = f"{MEDIAFLOW_URL}/proxy/hls/manifest.m3u8?d={encoded}"
-        if MEDIAFLOW_PSW:
-            url += f"&api_password={quote(MEDIAFLOW_PSW, safe='')}"
-        url += f"&h_Referer={quote(page_url, safe='')}&h_Origin={quote(SC_DOMAIN, safe='')}&h_User-Agent={quote(USER_AGENT, safe='')}"
-        return url
 
 
 async def get_streams(stremio_id: str, content_type: str) -> Dict:
@@ -140,42 +96,6 @@ async def get_streams(stremio_id: str, content_type: str) -> Dict:
         )
         logger.info(f"🎬 VixSrc page: {page_url}")
 
-        # ===== PRIORITA' 1: EasyProxy =====
-        if EASYPROXY_URL:
-            stream_url = build_easyproxy_url(page_url)
-            logger.info(f"✅ EasyProxy stream: {stream_url[:80]}")
-            result["streams"].append({
-                "name": "🛸 UFO 🇮🇹",
-                "title": "VixSrc • EasyProxy",
-                "url": stream_url,
-                "behaviorHints": {
-                    "notWebReady": False,
-                    "bingeGroup": "ufo-sc",
-                },
-            })
-            return result
-
-        # ===== PRIORITA' 2: MediaFlow Proxy =====
-        if MEDIAFLOW_URL:
-            m3u8_url = await extract_vixsrc_stream(page_url)
-            if m3u8_url:
-                stream_url = await build_mediaflow_url(m3u8_url, page_url)
-                if stream_url:
-                    logger.info(f"✅ MediaFlow stream: {stream_url[:80]}")
-                    result["streams"].append({
-                        "name": "🛸 UFO 🇮🇹",
-                        "title": "VixSrc • MediaFlow",
-                        "url": stream_url,
-                        "behaviorHints": {
-                            "notWebReady": False,
-                            "bingeGroup": "ufo-sc",
-                        },
-                    })
-            else:
-                logger.error("❌ Impossibile estrarre stream da VixSrc")
-            return result
-
-        # ===== NESSUN PROXY: stream diretto (potrebbe non funzionare fuori LAN) =====
         m3u8_url = await extract_vixsrc_stream(page_url)
         if m3u8_url:
             result["streams"].append({
@@ -195,7 +115,7 @@ async def get_streams(stremio_id: str, content_type: str) -> Dict:
                 },
             })
         else:
-            logger.error("❌ Nessun proxy configurato e stream diretto fallito")
+            logger.error("❌ Stream diretto non disponibile")
 
     except Exception as e:
         logger.error(f"❌ get_streams error: {e}")
