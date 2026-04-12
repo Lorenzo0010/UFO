@@ -1,18 +1,12 @@
 import logging
-import sys
-from pathlib import Path
 from typing import Any
-
-_root = Path(__file__).parent.parent
-if str(_root) not in sys.path:
-    sys.path.insert(0, str(_root))
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from api.config import ADDON_NAME, ADDON_LOGO
-from api.resolver import get_streams
+from .config import ADDON_NAME, ADDON_LOGO, EASYPROXY_URL
+from .resolver import get_streams
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
@@ -20,8 +14,8 @@ app = FastAPI(title=f"{ADDON_NAME} Addon")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=False,
-    allow_methods=["GET", "OPTIONS"],
+    allow_credentials=True,
+    allow_methods=["*"],
     allow_headers=["*"],
 )
 
@@ -38,7 +32,7 @@ async def root(request: Request):
     return respond_with({
         "status": "online",
         "addon": ADDON_NAME,
-        "proxy_mode": "none",
+        "easyproxy": bool(EASYPROXY_URL),
         "manifest": f"{base}/U0MQ/manifest.json",
     })
 
@@ -47,23 +41,14 @@ async def root(request: Request):
 async def manifest():
     return respond_with({
         "id": "org.stremio.mammamia.ufo",
-        "version": "1.7.0",
+        "version": "1.4.0",
         "name": ADDON_NAME,
-        "description": "VixSrc • stream diretto (no proxy)",
+        "description": "VixSrc via EasyProxy",
         "logo": ADDON_LOGO,
-        "resources": [
-            {
-                "name": "stream",
-                "types": ["movie", "series"],
-                "idPrefixes": ["tt", "tmdb"]
-            }
-        ],
+        "resources": ["stream"],
         "types": ["movie", "series"],
         "catalogs": [],
-        "behaviorHints": {
-            "configurable": False,
-            "adult": False
-        },
+        "behaviorHints": {"configurable": False},
     })
 
 
@@ -75,9 +60,6 @@ async def streams_route(type: str, id: str):
         data = await get_streams(id, type)
     except Exception:
         data = {"streams": []}
-    data["cacheMaxAge"] = 0
-    data["staleRevalidate"] = 0
-    data["staleError"] = 0
     return respond_with(data)
 
 
