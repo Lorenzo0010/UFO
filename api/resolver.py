@@ -6,7 +6,7 @@ from urllib.parse import quote
 from curl_cffi.requests import AsyncSession
 from bs4 import BeautifulSoup, SoupStrainer
 
-from .config import SC_DOMAIN, USER_AGENT
+from .config import SC_DOMAIN, USER_AGENT, EASYPROXY_URL
 from .tmdb import get_tmdb_id
 
 logger = logging.getLogger(__name__)
@@ -20,10 +20,31 @@ BROWSER_HEADERS = {
 }
 
 
+def build_easyproxy_url(m3u8_url: str, referer: str) -> Optional[str]:
+    """
+    Costruisce l'URL proxato tramite EasyProxy.
+    Restituisce None se EASYPROXY_URL non è configurato.
+    """
+    if not EASYPROXY_URL:
+        logger.error("❌ EASYPROXY_URL non configurato")
+        return None
+    base = EASYPROXY_URL.rstrip("/")
+    encoded_url      = quote(m3u8_url, safe="")
+    encoded_referer  = quote(referer, safe="")
+    encoded_origin   = quote(SC_DOMAIN, safe="")
+    encoded_ua       = quote(USER_AGENT, safe="")
+    return (
+        f"{base}/proxy/m3u8?url={encoded_url}"
+        f"&referer={encoded_referer}"
+        f"&origin={encoded_origin}"
+        f"&userAgent={encoded_ua}"
+    )
+
+
 async def extract_vixsrc_stream(page_url: str) -> Optional[str]:
     """
-    Estrae il vero URL dello stream da VixSrc leggendo token, expires
-    e server_url dallo script inline della pagina.
+    Estrae il vero URL dello stream .m3u8 da VixSrc leggendo token,
+    expires e server_url dallo script inline della pagina.
     """
     async with AsyncSession() as client:
         try:
@@ -97,25 +118,25 @@ async def get_streams(stremio_id: str, content_type: str) -> Dict:
         logger.info(f"🎬 VixSrc page: {page_url}")
 
         m3u8_url = await extract_vixsrc_stream(page_url)
-        if m3u8_url:
-            result["streams"].append({
-                "name": "🛸 UFO 🇮🇹",
-                "title": "VixSrc • Diretto",
-                "url": m3u8_url,
-                "behaviorHints": {
-                    "notWebReady": True,
-                    "proxyHeaders": {
-                        "request": {
-                            "User-Agent": USER_AGENT,
-                            "Referer": page_url,
-                            "Origin": SC_DOMAIN,
-                        }
-                    },
-                    "bingeGroup": "ufo-sc",
-                },
-            })
-        else:
-            logger.error("❌ Stream diretto non disponibile")
+        if not m3u8_url:
+            logger.error("❌ Stream .m3u8 non estratto da VixSrc")
+            return result
+
+        proxied_url = build_easyproxy_url(m3u8_url, referer=page_url)
+        if not proxied_url:
+            logger.error("❌ Impossibile costruire URL EasyProxy (EASYPROXY_URL mancante)")
+            return result
+
+        result["streams"].append({
+            "name": "🛸 UFO 🇮🇹",
+            "title": "VixSrc • EasyProxy",
+            "url": proxied_url,
+            "behaviorHints": {
+                "notWebReady": True,
+                "bingeGroup": "ufo-sc",
+            },
+        })
+        logger.info(f"✅ Stream EasyProxy aggiunto: {proxied_url[:80]}")
 
     except Exception as e:
         logger.error(f"❌ get_streams error: {e}")
