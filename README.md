@@ -83,7 +83,7 @@ UFO/
 │   ├── tmdb.py           # Risoluzione IMDb → TMDB con cache in-memory e sessione condivisa
 │   └── resolver.py       # Costruzione URL EasyProxy e restituzione stream
 ├── Dockerfile            # Immagine Docker per deploy su VPS/Orange Pi/qualsiasi host
-├── Procfile              # Avvio per Koyeb: uvicorn api.index:app --port 8080
+├── Procfile              # Avvio per Koyeb: uvicorn api.index:app --port 8000
 ├── requirements.txt      # Dipendenze con versioni pinnate
 └── README.md
 ```
@@ -122,11 +122,11 @@ Entry point FastAPI. Il `lifespan` esegue `validate_config()` all'avvio e chiude
 | `GET /{ADDON_PATH}/catalog/{type}/{id}.json` | Catalogo vuoto |
 
 #### `Dockerfile`
-Immagine basata su `python:3.12-slim`. Copia prima `requirements.txt` per sfruttare la cache layer di Docker, poi il codice sorgente. Porta esposta: `8080`.
+Immagine basata su `python:3.12-slim`. Copia prima `requirements.txt` per sfruttare la cache layer di Docker, poi il codice sorgente. Porta esposta: `8000`.
 
 #### `Procfile`
 ```
-web: uvicorn api.index:app --host 0.0.0.0 --port 8080
+web: uvicorn api.index:app --host 0.0.0.0 --port 8000
 ```
 
 #### `requirements.txt`
@@ -160,8 +160,8 @@ Connetti il repository su [Koyeb](https://app.koyeb.com) tramite **GitHub**.
 | Campo | Valore |
 |---|---|
 | **Builder** | Buildpack |
-| **Run command** | `uvicorn api.index:app --host 0.0.0.0 --port 8080` |
-| **Port** | `8080` |
+| **Run command** | `uvicorn api.index:app --host 0.0.0.0 --port 8000` |
+| **Port** | `8000` |
 
 Koyeb legge automaticamente il `Procfile`.
 
@@ -180,7 +180,7 @@ Koyeb legge automaticamente il `Procfile`.
 
 ### 4. Deploy
 
-Clicca **Deploy**. Koyeb avvierà il servizio sulla porta `8080`.
+Clicca **Deploy**. Koyeb avvierà il servizio sulla porta `8000`.
 
 ---
 
@@ -192,7 +192,7 @@ docker build -t ufo-addon .
 
 # Avvia il container
 docker run -d \
-  -p 8080:8080 \
+  -p 8000:8000 \
   -e TMDB_KEY=la_tua_api_key \
   -e EASYPROXY_URL=https://myproxy.example.com \
   -e EASYPROXY_PASSWORD=password_opzionale \
@@ -233,7 +233,7 @@ pip install -r requirements.txt
 # (copia l'esempio qui sotto)
 
 # Avvia il server
-uvicorn api.index:app --reload --port 8080
+uvicorn api.index:app --reload --port 8000
 ```
 
 **Esempio `.env`:**
@@ -273,6 +273,11 @@ L'autore non è responsabile per danni derivanti dall'uso di questo software.
 
 ## 📋 Changelog
 
+### [1.4.1] — 2026-04-13
+> Porta aggiornata a 8000 per compatibilità Koyeb
+
+- **fix**: porta aggiornata da `8080` a `8000` in README, `Procfile` description, `Dockerfile` description e negli esempi Docker/sviluppo locale
+
 ### [1.4.0] — 2026-04-13
 > Sicurezza, performance e infrastruttura
 
@@ -280,7 +285,7 @@ L'autore non è responsabile per danni derivanti dall'uso di questo software.
 - **perf**: aggiunta cache in-memory per le risoluzioni IMDb → TMDB; aggiunta sessione HTTP condivisa (`AsyncSession`) creata una sola volta e chiusa nel `lifespan`
 - **feat**: `ADDON_PATH` configurabile via env var (default `U0MQ`); versione nel manifest leggibile da `config.py`
 - **chore**: dipendenze pinnate a versioni specifiche in `requirements.txt`; aggiunto `Dockerfile` basato su `python:3.12-slim`
-- **docs**: README aggiornato per riflettere porta `8080`, assenza di API key hardcodata e `validate_config()`; URL manifest nell'esempio corretto con `ADDON_PATH`
+- **docs**: README aggiornato per riflettere porta `8000`, assenza di API key hardcodata e `validate_config()`; URL manifest nell'esempio corretto con `ADDON_PATH`
 
 ### [1.3.0] — 2026-04-13
 > Consolidamento su EasyProxy + Koyeb
