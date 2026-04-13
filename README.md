@@ -44,7 +44,7 @@ UFO fa da ponte tra Stremio e VixSrc. Il sistema usa **EasyProxy** per aggirare 
 ```
 Stremio
   │
-  │  GET /{ADDON_PATH}/stream/{type}/{id}.json
+  │  GET /stream/{type}/{id}.json
   ▼
 api/index.py  ──►  api/resolver.py
                         │
@@ -78,8 +78,8 @@ api/index.py  ──►  api/resolver.py
 UFO/
 ├── api/
 │   ├── __init__.py       # Rende api/ un package Python
-│   ├── index.py          # Entry point: app FastAPI, lifespan, route dinamiche via ADDON_PATH
-│   ├── config.py         # Env vars, ADDON_PATH, validate_config()
+│   ├── index.py          # Entry point: app FastAPI, lifespan, route
+│   ├── config.py         # Env vars e validate_config()
 │   ├── tmdb.py           # Risoluzione IMDb → TMDB con cache in-memory e sessione condivisa
 │   └── resolver.py       # Costruzione URL EasyProxy e restituzione stream
 ├── Dockerfile            # Immagine Docker per deploy su VPS/Orange Pi/qualsiasi host
@@ -91,7 +91,7 @@ UFO/
 ### Descrizione file
 
 #### `api/config.py`
-Centralizza tutta la configurazione. Le variabili sensibili (`TMDB_KEY`, `EASYPROXY_URL`) non hanno valori di default. `ADDON_PATH` (default `U0MQ`) permette di personalizzare il prefisso delle route senza toccare il codice.
+Centralizza tutta la configurazione. Le variabili sensibili (`TMDB_KEY`, `EASYPROXY_URL`) non hanno valori di default.
 
 ```python
 SC_DOMAIN    = os.getenv("SC_DOMAIN", "https://vixsrc.to")
@@ -99,7 +99,6 @@ TMDB_API_KEY = os.getenv("TMDB_KEY", "")        # ⚠️ Obbligatoria — impost
 USER_AGENT   = os.getenv("USER_AGENT", "Mozilla/5.0 ...")
 EASYPROXY_URL = os.getenv("EASYPROXY_URL", "").rstrip("/")
 EASYPROXY_PSW = os.getenv("EASYPROXY_PASSWORD", "")
-ADDON_PATH   = os.getenv("ADDON_PATH", "U0MQ").strip("/")
 ```
 
 > ⚠️ Non inserire mai `TMDB_KEY` direttamente nel codice.
@@ -111,15 +110,15 @@ Risolve IMDb ID → TMDB ID con **cache in-memory** e **sessione HTTP condivisa*
 Costruisce l'URL EasyProxy e restituisce lo stream a Stremio.
 
 #### `api/index.py`
-Entry point FastAPI. Il `lifespan` esegue `validate_config()` all'avvio e chiude la sessione HTTP allo shutdown. Le route usano `ADDON_PATH` come prefisso dinamico.
+Entry point FastAPI. Il `lifespan` esegue `validate_config()` all'avvio e chiude la sessione HTTP allo shutdown.
 
 | Route | Funzione |
 |---|---|
 | `GET /` | Status check + link al manifest |
-| `GET /{ADDON_PATH}/manifest.json` | Manifest Stremio |
-| `GET /{ADDON_PATH}/stream/{type}/{id}.json` | **Route principale** |
-| `GET /{ADDON_PATH}/meta/{type}/{id}.json` | Metadati stub |
-| `GET /{ADDON_PATH}/catalog/{type}/{id}.json` | Catalogo vuoto |
+| `GET /manifest.json` | Manifest Stremio |
+| `GET /stream/{type}/{id}.json` | **Route principale** |
+| `GET /meta/{type}/{id}.json` | Metadati stub |
+| `GET /catalog/{type}/{id}.json` | Catalogo vuoto |
 
 #### `Dockerfile`
 Immagine basata su `python:3.12-slim`. Copia prima `requirements.txt` per sfruttare la cache layer di Docker, poi il codice sorgente. Porta esposta: `8000`.
@@ -174,7 +173,6 @@ Koyeb legge automaticamente il `Procfile`.
 | `EASYPROXY_PASSWORD` | ❌ Facoltativa | Password EasyProxy |
 | `SC_DOMAIN` | ❌ Facoltativa | Dominio VixSrc alternativo (default: `https://vixsrc.to`) |
 | `USER_AGENT` | ❌ Facoltativa | User-Agent HTTP personalizzato |
-| `ADDON_PATH` | ❌ Facoltativa | Prefisso route (default: `U0MQ`) |
 
 > All'avvio `validate_config()` logga un `⚠️ warning` per ogni variabile obbligatoria mancante.
 
@@ -213,11 +211,9 @@ Apri nel browser l'URL del servizio. La risposta mostrerà il link al manifest:
   "status": "online",
   "addon": "UFO addon",
   "easyproxy": true,
-  "manifest": "https://<tuo-servizio>/<ADDON_PATH>/manifest.json"
+  "manifest": "https://<tuo-servizio>/manifest.json"
 }
 ```
-
-> Il valore di `<ADDON_PATH>` dipende dalla variabile d'ambiente `ADDON_PATH` (default: `U0MQ`).
 
 Incolla il link manifest in Stremio → **Addon** → **Aggiungi addon tramite URL**.
 
@@ -245,7 +241,6 @@ EASYPROXY_PASSWORD=password_opzionale
 # Opzionali
 # SC_DOMAIN=https://vixsrc.to
 # USER_AGENT=Mozilla/5.0 ...
-# ADDON_PATH=U0MQ
 ```
 
 ---
@@ -255,10 +250,10 @@ EASYPROXY_PASSWORD=password_opzionale
 | Metodo | Path | Descrizione |
 |---|---|---|
 | `GET` | `/` | Status e link al manifest |
-| `GET` | `/{ADDON_PATH}/manifest.json` | Manifest Stremio |
-| `GET` | `/{ADDON_PATH}/stream/{type}/{id}.json` | Risoluzione stream |
-| `GET` | `/{ADDON_PATH}/meta/{type}/{id}.json` | Metadati (stub) |
-| `GET` | `/{ADDON_PATH}/catalog/{type}/{id}.json` | Catalogo (vuoto) |
+| `GET` | `/manifest.json` | Manifest Stremio |
+| `GET` | `/stream/{type}/{id}.json` | Risoluzione stream |
+| `GET` | `/meta/{type}/{id}.json` | Metadati (stub) |
+| `GET` | `/catalog/{type}/{id}.json` | Catalogo (vuoto) |
 
 ---
 
@@ -273,6 +268,13 @@ L'autore non è responsabile per danni derivanti dall'uso di questo software.
 
 ## 📋 Changelog
 
+### [1.5.0] — 2026-04-13
+> Rimozione ADDON_PATH
+
+- **refactor**: rimossa la variabile d'ambiente `ADDON_PATH` — le route sono ora servite direttamente alla radice (`/manifest.json`, `/stream/...`, ecc.)
+- Su Koyeb ogni deploy ha già il proprio dominio dedicato, quindi il prefisso dinamico era ridondante
+- **bump**: versione manifest aggiornata a `1.5.0`
+
 ### [1.4.1] — 2026-04-13
 > Porta aggiornata a 8000 per compatibilità Koyeb
 
@@ -285,7 +287,7 @@ L'autore non è responsabile per danni derivanti dall'uso di questo software.
 - **perf**: aggiunta cache in-memory per le risoluzioni IMDb → TMDB; aggiunta sessione HTTP condivisa (`AsyncSession`) creata una sola volta e chiusa nel `lifespan`
 - **feat**: `ADDON_PATH` configurabile via env var (default `U0MQ`); versione nel manifest leggibile da `config.py`
 - **chore**: dipendenze pinnate a versioni specifiche in `requirements.txt`; aggiunto `Dockerfile` basato su `python:3.12-slim`
-- **docs**: README aggiornato per riflettere porta `8000`, assenza di API key hardcodata e `validate_config()`; URL manifest nell'esempio corretto con `ADDON_PATH`
+- **docs**: README aggiornato
 
 ### [1.3.0] — 2026-04-13
 > Consolidamento su EasyProxy + Koyeb
