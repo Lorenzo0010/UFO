@@ -1,6 +1,6 @@
-fastapi
-curl_cffi
-uvicorn
-python-dotenv
-beautifulsoup4
-lxml
+fastapi==0.115.12
+curl_cffi==0.14.0
+uvicorn==0.34.0
+python-dotenv==1.1.0
+beautifulsoup4==4.13.4
+lxml==5.3.1

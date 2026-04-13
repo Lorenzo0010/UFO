@@ -13,6 +13,9 @@ USER_AGENT   = os.getenv("USER_AGENT", "Mozilla/5.0 (Windows NT 10.0; Win64; x64
 EASYPROXY_URL = os.getenv("EASYPROXY_URL", "").rstrip("/")
 EASYPROXY_PSW = os.getenv("EASYPROXY_PASSWORD", "")
 
+# Path base delle route Stremio — configurabile per deploy multipli sullo stesso host
+ADDON_PATH = os.getenv("ADDON_PATH", "U0MQ").strip("/")
+
 
 def validate_config() -> None:
     """Verifica che le variabili obbligatorie siano presenti all'avvio."""
