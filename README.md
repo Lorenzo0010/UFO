@@ -80,11 +80,11 @@ api/index.py  ──►  api/resolver.py
 UFO/
 ├── api/
 │   ├── __init__.py       # Rende api/ un package Python (necessario per gli import relativi)
-│   ├── index.py          # Entry point: app FastAPI, middleware CORS, tutte le route
-│   ├── config.py         # Costanti e lettura variabili d'ambiente (.env / env vars piattaforma)
+│   ├── index.py          # Entry point: app FastAPI, middleware CORS, lifespan, tutte le route
+│   ├── config.py         # Costanti, lettura env vars e validazione configurazione all'avvio
 │   ├── tmdb.py           # Risoluzione IMDb ID → TMDB ID tramite API TMDB
 │   └── resolver.py       # Logica principale: costruzione URL EasyProxy e restituzione stream
-├── Procfile              # Comando di avvio per Koyeb: uvicorn api.index:app
+├── Procfile              # Comando di avvio per Koyeb: uvicorn api.index:app --port 8080
 ├── requirements.txt      # Dipendenze Python: fastapi, uvicorn, curl_cffi, python-dotenv, ecc.
 └── README.md
 ```
@@ -95,15 +95,18 @@ UFO/
 File vuoto che trasforma la cartella `api/` in un package Python. Senza di esso gli import relativi (`from .config import ...`) non funzionerebbero.
 
 #### `api/config.py`
-Centralizza tutta la configurazione dell'addon. Legge le variabili d'ambiente con `os.getenv()` e fornisce valori di default. Importato da tutti gli altri moduli.
+Centralizza tutta la configurazione dell'addon. Legge le variabili d'ambiente con `os.getenv()` senza valori di default per le chiavi sensibili. All'avvio viene chiamata `validate_config()` che logga un warning per ogni variabile obbligatoria mancante.
 
 ```python
-SC_DOMAIN      = os.getenv("SC_DOMAIN", "https://vixsrc.to")
-TMDB_API_KEY   = os.getenv("TMDB_KEY", "...")
+SC_DOMAIN     = os.getenv("SC_DOMAIN", "https://vixsrc.to")
+TMDB_API_KEY  = os.getenv("TMDB_KEY", "")        # ⚠️ Nessun valore di default — impostare via env var
+USER_AGENT    = os.getenv("USER_AGENT", "Mozilla/5.0 ...")
 
-EASYPROXY_URL  = os.getenv("EASYPROXY_URL", "").rstrip("/")
-EASYPROXY_PSW  = os.getenv("EASYPROXY_PASSWORD", "")
+EASYPROXY_URL = os.getenv("EASYPROXY_URL", "").rstrip("/")
+EASYPROXY_PSW = os.getenv("EASYPROXY_PASSWORD", "")
 ```
+
+> ⚠️ Non inserire mai la TMDB API key direttamente nel codice. Usare sempre la variabile d'ambiente `TMDB_KEY`.
 
 #### `api/tmdb.py`
 Contiene la funzione `get_tmdb_id(content_id, content_type)`. Se l'ID è un IMDb ID (`tt…`), chiama l'endpoint `/find` di TMDB per convertirlo. Gestisce sia film che serie con fallback tra i due tipi.
@@ -114,7 +117,7 @@ Cuore logico dell'addon. Contiene:
 - `get_streams(stremio_id, content_type)` — orchestra la risoluzione TMDB e la generazione dello stream da restituire a Stremio
 
 #### `api/index.py`
-Entry point dell'applicazione. Inizializza FastAPI, aggiunge il middleware CORS (necessario per Stremio) e definisce tutte le route.
+Entry point dell'applicazione. Inizializza FastAPI con un `lifespan` che esegue `validate_config()` all'avvio, aggiunge il middleware CORS (necessario per Stremio) e definisce tutte le route. Le eccezioni nei route vengono loggate con `logger.exception()` per preservare il traceback completo.
 
 | Route | Funzione |
 |---|---|
@@ -127,7 +130,7 @@ Entry point dell'applicazione. Inizializza FastAPI, aggiunge il middleware CORS 
 #### `Procfile`
 Dice a Koyeb come avviare l'app:
 ```
-web: uvicorn api.index:app --host 0.0.0.0 --port $PORT
+web: uvicorn api.index:app --host 0.0.0.0 --port 8080
 ```
 
 #### `requirements.txt`
@@ -145,7 +148,7 @@ web: uvicorn api.index:app --host 0.0.0.0 --port $PORT
 ## Prerequisiti
 
 - Un'istanza **EasyProxy** raggiungibile pubblicamente
-- Una **TMDB API Key** (gratuita su [themoviedb.org](https://www.themoviedb.org/settings/api))
+- Una **TMDB API Key** personale (gratuita su [themoviedb.org](https://www.themoviedb.org/settings/api))
 
 ---
 
@@ -160,8 +163,8 @@ Connetti questo repository su [Koyeb](https://app.koyeb.com) tramite **GitHub**.
 | Campo | Valore |
 |---|---|
 | **Builder** | Buildpack |
-| **Run command** | `uvicorn api.index:app --host 0.0.0.0 --port $PORT` |
-| **Port** | `8000` |
+| **Run command** | `uvicorn api.index:app --host 0.0.0.0 --port 8080` |
+| **Port** | `8080` |
 
 Koyeb legge automaticamente il `Procfile`, quindi il run command è già configurato.
 
@@ -171,14 +174,17 @@ Imposta le seguenti variabili nella sezione **Environment variables** del serviz
 
 | Variabile | Obbligatoria | Descrizione |
 |---|---|---|
+| `TMDB_KEY` | ✅ Sì | La tua API key TMDB personale — **non hardcodarla mai nel codice** |
 | `EASYPROXY_URL` | ✅ Sì | URL base della tua istanza EasyProxy (es. `https://myproxy.koyeb.app`) |
 | `EASYPROXY_PASSWORD` | ❌ Se configurata | Password dell'istanza EasyProxy |
-| `TMDB_KEY` | ⚠️ Consigliata | La tua API key TMDB personale |
 | `SC_DOMAIN` | ❌ No | Dominio VixSrc alternativo (default: `https://vixsrc.to`) |
+| `USER_AGENT` | ❌ No | User-Agent HTTP personalizzato |
+
+> All'avvio, `validate_config()` logga automaticamente un `⚠️ warning` per ogni variabile obbligatoria mancante.
 
 ### 4. Deploy
 
-Clicca **Deploy**. Koyeb costruirà l'immagine e avvierà il servizio.
+Clicca **Deploy**. Koyeb costruirà l'immagine e avvierà il servizio sulla porta `8080`.
 
 ---
 
@@ -210,7 +216,7 @@ pip install -r requirements.txt
 cp .env.example .env  # oppure crealo manualmente
 
 # Avvia il server
-uvicorn api.index:app --reload --port 8000
+uvicorn api.index:app --reload --port 8080
 ```
 
 **Esempio `.env`:**
