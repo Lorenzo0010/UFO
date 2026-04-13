@@ -1,7 +1,7 @@
 # 🛸 UFO — Stremio Addon
 
 > Addon Stremio che fornisce stream HLS da **VixSrc** tramite **EasyProxy**.
-> Supporta il deploy su [Koyeb](https://koyeb.com).
+> Supporta il deploy su [Koyeb](https://koyeb.com) e tramite Docker.
 
 ---
 
@@ -30,7 +30,7 @@ Questo progetto nasce come studio pratico dei seguenti argomenti:
 - Integrazione con API di terze parti (**TMDB API**)
 - Architettura di addon per **Stremio** e il relativo protocollo
 - Utilizzo di **EasyProxy** per la gestione di stream HLS
-- Deploy su piattaforma cloud moderna (**Koyeb**)
+- Deploy su piattaforma cloud moderna (**Koyeb**) e tramite **Docker**
 - Strutturazione di progetti Python in moduli riutilizzabili
 
 Il codice è intenzionalmente documentato e organizzato per essere comprensibile e riutilizzabile come riferimento didattico.
@@ -41,16 +41,14 @@ Il codice è intenzionalmente documentato e organizzato per essere comprensibile
 
 UFO fa da ponte tra Stremio e VixSrc. Il sistema usa **EasyProxy** per aggirare il blocco degli IP datacenter:
 
-1. **EasyProxy** — riceve l'URL della pagina VixSrc come parametro `?d=` ed effettua internamente scraping + fetch del manifest HLS.
-
 ```
 Stremio
   │
-  │  GET /U0MQ/stream/{type}/{id}.json
+  │  GET /{ADDON_PATH}/stream/{type}/{id}.json
   ▼
 api/index.py  ──►  api/resolver.py
                         │
-                        │  1. Risolve IMDb ID → TMDB ID  (via api/tmdb.py)
+                        │  1. Risolve IMDb ID → TMDB ID  (via api/tmdb.py + cache)
                         │  2. Costruisce URL pagina VixSrc
                         │  3. Passa la pagina VixSrc a EasyProxy (?d=<vixsrc_page>)
                         ▼
@@ -64,11 +62,11 @@ api/index.py  ──►  api/resolver.py
 
 1. **Stremio** invia una richiesta all'addon con l'ID del contenuto (IMDb `tt…` o TMDB numerico) e il tipo (`movie` / `series`)
 2. **`resolver.py`** divide l'ID in parti: `content_id`, `season`, `episode` (per le serie)
-3. **`tmdb.py`** chiama l'API TMDB `/find/{imdb_id}` per ottenere l'ID numerico TMDB (se l'ID è già numerico, lo usa direttamente)
+3. **`tmdb.py`** controlla la **cache in-memory** — se l'ID è già stato risolto, risponde senza chiamare TMDB; altrimenti chiama l'endpoint `/find` e salva il risultato
 4. Viene costruita la **URL della pagina VixSrc** nel formato:
    - Film: `https://vixsrc.to/movie/{tmdb_id}/`
    - Serie: `https://vixsrc.to/tv/{tmdb_id}/{season}/{episode}/`
-5. La pagina VixSrc viene passata direttamente come `?d=` a **EasyProxy**, che si occupa di tutto il resto. Lo stream viene restituito immediatamente.
+5. La pagina VixSrc viene passata come `?d=` a **EasyProxy**, che restituisce il manifest HLS
 
 > ⚠️ `EASYPROXY_URL` deve essere configurato. Senza di esso, VixSrc blocca le richieste provenienti da IP di datacenter (es. Koyeb).
 
@@ -79,124 +77,149 @@ api/index.py  ──►  api/resolver.py
 ```
 UFO/
 ├── api/
-│   ├── __init__.py       # Rende api/ un package Python (necessario per gli import relativi)
-│   ├── index.py          # Entry point: app FastAPI, middleware CORS, tutte le route
-│   ├── config.py         # Costanti e lettura variabili d'ambiente (.env / env vars piattaforma)
-│   ├── tmdb.py           # Risoluzione IMDb ID → TMDB ID tramite API TMDB
-│   └── resolver.py       # Logica principale: costruzione URL EasyProxy e restituzione stream
-├── Procfile              # Comando di avvio per Koyeb: uvicorn api.index:app
-├── requirements.txt      # Dipendenze Python: fastapi, uvicorn, curl_cffi, python-dotenv, ecc.
+│   ├── __init__.py       # Rende api/ un package Python
+│   ├── index.py          # Entry point: app FastAPI, lifespan, route dinamiche via ADDON_PATH
+│   ├── config.py         # Env vars, ADDON_PATH, validate_config()
+│   ├── tmdb.py           # Risoluzione IMDb → TMDB con cache in-memory e sessione condivisa
+│   └── resolver.py       # Costruzione URL EasyProxy e restituzione stream
+├── Dockerfile            # Immagine Docker per deploy su VPS/Orange Pi/qualsiasi host
+├── Procfile              # Avvio per Koyeb: uvicorn api.index:app --port 8080
+├── requirements.txt      # Dipendenze con versioni pinnate
 └── README.md
 ```
 
 ### Descrizione file
 
-#### `api/__init__.py`
-File vuoto che trasforma la cartella `api/` in un package Python. Senza di esso gli import relativi (`from .config import ...`) non funzionerebbero.
-
 #### `api/config.py`
-Centralizza tutta la configurazione dell'addon. Legge le variabili d'ambiente con `os.getenv()` e fornisce valori di default. Importato da tutti gli altri moduli.
+Centralizza tutta la configurazione. Le variabili sensibili (`TMDB_KEY`, `EASYPROXY_URL`) non hanno valori di default. `ADDON_PATH` (default `U0MQ`) permette di personalizzare il prefisso delle route senza toccare il codice.
 
 ```python
-SC_DOMAIN      = os.getenv("SC_DOMAIN", "https://vixsrc.to")
-TMDB_API_KEY   = os.getenv("TMDB_KEY", "...")
-
-EASYPROXY_URL  = os.getenv("EASYPROXY_URL", "").rstrip("/")
-EASYPROXY_PSW  = os.getenv("EASYPROXY_PASSWORD", "")
+SC_DOMAIN    = os.getenv("SC_DOMAIN", "https://vixsrc.to")
+TMDB_API_KEY = os.getenv("TMDB_KEY", "")        # ⚠️ Obbligatoria — impostare via env var
+USER_AGENT   = os.getenv("USER_AGENT", "Mozilla/5.0 ...")
+EASYPROXY_URL = os.getenv("EASYPROXY_URL", "").rstrip("/")
+EASYPROXY_PSW = os.getenv("EASYPROXY_PASSWORD", "")
+ADDON_PATH   = os.getenv("ADDON_PATH", "U0MQ").strip("/")
 ```
 
+> ⚠️ Non inserire mai `TMDB_KEY` direttamente nel codice.
+
 #### `api/tmdb.py`
-Contiene la funzione `get_tmdb_id(content_id, content_type)`. Se l'ID è un IMDb ID (`tt…`), chiama l'endpoint `/find` di TMDB per convertirlo. Gestisce sia film che serie con fallback tra i due tipi.
+Risolve IMDb ID → TMDB ID con **cache in-memory** e **sessione HTTP condivisa** (`AsyncSession` creata una volta sola e riutilizzata). La cache evita chiamate duplicate per lo stesso contenuto durante la sessione.
 
 #### `api/resolver.py`
-Cuore logico dell'addon. Contiene:
-- `build_easyproxy_url(vixsrc_page_url)` — costruisce l'URL EasyProxy passando la pagina VixSrc come `?d=`
-- `get_streams(stremio_id, content_type)` — orchestra la risoluzione TMDB e la generazione dello stream da restituire a Stremio
+Costruisce l'URL EasyProxy e restituisce lo stream a Stremio.
 
 #### `api/index.py`
-Entry point dell'applicazione. Inizializza FastAPI, aggiunge il middleware CORS (necessario per Stremio) e definisce tutte le route.
+Entry point FastAPI. Il `lifespan` esegue `validate_config()` all'avvio e chiude la sessione HTTP allo shutdown. Le route usano `ADDON_PATH` come prefisso dinamico.
 
 | Route | Funzione |
 |---|---|
 | `GET /` | Status check + link al manifest |
-| `GET /U0MQ/manifest.json` | Manifest Stremio (nome, versione, tipi supportati) |
-| `GET /U0MQ/stream/{type}/{id}.json` | **Route principale** — risolve e restituisce gli stream |
-| `GET /U0MQ/meta/{type}/{id}.json` | Metadati stub (richiesto dal protocollo Stremio) |
-| `GET /U0MQ/catalog/{type}/{id}.json` | Catalogo vuoto (l'addon non fornisce cataloghi) |
+| `GET /{ADDON_PATH}/manifest.json` | Manifest Stremio |
+| `GET /{ADDON_PATH}/stream/{type}/{id}.json` | **Route principale** |
+| `GET /{ADDON_PATH}/meta/{type}/{id}.json` | Metadati stub |
+| `GET /{ADDON_PATH}/catalog/{type}/{id}.json` | Catalogo vuoto |
+
+#### `Dockerfile`
+Immagine basata su `python:3.12-slim`. Copia prima `requirements.txt` per sfruttare la cache layer di Docker, poi il codice sorgente. Porta esposta: `8080`.
 
 #### `Procfile`
-Dice a Koyeb come avviare l'app:
 ```
-web: uvicorn api.index:app --host 0.0.0.0 --port $PORT
+web: uvicorn api.index:app --host 0.0.0.0 --port 8080
 ```
 
 #### `requirements.txt`
-| Pacchetto | Utilizzo |
-|---|---|
-| `fastapi` | Framework web per le API REST |
-| `uvicorn` | Server ASGI che esegue FastAPI |
-| `curl_cffi` | Client HTTP con fingerprint browser per le chiamate a TMDB e VixSrc |
-| `python-dotenv` | Caricamento variabili da file `.env` in sviluppo locale |
-| `beautifulsoup4` | Parsing HTML |
-| `lxml` | Parser XML/HTML per BeautifulSoup |
+| Pacchetto | Versione | Utilizzo |
+|---|---|---|
+| `fastapi` | 0.115.12 | Framework web REST |
+| `uvicorn` | 0.34.0 | Server ASGI |
+| `curl_cffi` | 0.14.0 | Client HTTP con fingerprint browser |
+| `python-dotenv` | 1.1.0 | Caricamento `.env` in locale |
+| `beautifulsoup4` | 4.13.4 | Parsing HTML |
+| `lxml` | 5.3.1 | Parser XML/HTML |
 
 ---
 
 ## Prerequisiti
 
 - Un'istanza **EasyProxy** raggiungibile pubblicamente
-- Una **TMDB API Key** (gratuita su [themoviedb.org](https://www.themoviedb.org/settings/api))
+- Una **TMDB API Key** personale (gratuita su [themoviedb.org](https://www.themoviedb.org/settings/api))
+- **Docker** (opzionale, per deploy non-Koyeb)
 
 ---
 
 ## Deploy su Koyeb
 
-### 1. Fork o connetti il repo
+### 1. Connetti il repo
 
-Connetti questo repository su [Koyeb](https://app.koyeb.com) tramite **GitHub**.
+Connetti il repository su [Koyeb](https://app.koyeb.com) tramite **GitHub**.
 
 ### 2. Configurazione servizio
 
 | Campo | Valore |
 |---|---|
 | **Builder** | Buildpack |
-| **Run command** | `uvicorn api.index:app --host 0.0.0.0 --port $PORT` |
-| **Port** | `8000` |
+| **Run command** | `uvicorn api.index:app --host 0.0.0.0 --port 8080` |
+| **Port** | `8080` |
 
-Koyeb legge automaticamente il `Procfile`, quindi il run command è già configurato.
+Koyeb legge automaticamente il `Procfile`.
 
 ### 3. Variabili d'ambiente
 
-Imposta le seguenti variabili nella sezione **Environment variables** del servizio Koyeb:
-
 | Variabile | Obbligatoria | Descrizione |
 |---|---|---|
-| `EASYPROXY_URL` | ✅ Sì | URL base della tua istanza EasyProxy (es. `https://myproxy.koyeb.app`) |
-| `EASYPROXY_PASSWORD` | ❌ Se configurata | Password dell'istanza EasyProxy |
-| `TMDB_KEY` | ⚠️ Consigliata | La tua API key TMDB personale |
-| `SC_DOMAIN` | ❌ No | Dominio VixSrc alternativo (default: `https://vixsrc.to`) |
+| `TMDB_KEY` | ✅ Sì | API key TMDB personale |
+| `EASYPROXY_URL` | ✅ Sì | URL base EasyProxy (es. `https://myproxy.koyeb.app`) |
+| `EASYPROXY_PASSWORD` | ❌ Facoltativa | Password EasyProxy |
+| `SC_DOMAIN` | ❌ Facoltativa | Dominio VixSrc alternativo (default: `https://vixsrc.to`) |
+| `USER_AGENT` | ❌ Facoltativa | User-Agent HTTP personalizzato |
+| `ADDON_PATH` | ❌ Facoltativa | Prefisso route (default: `U0MQ`) |
+
+> All'avvio `validate_config()` logga un `⚠️ warning` per ogni variabile obbligatoria mancante.
 
 ### 4. Deploy
 
-Clicca **Deploy**. Koyeb costruirà l'immagine e avvierà il servizio.
+Clicca **Deploy**. Koyeb avvierà il servizio sulla porta `8080`.
+
+---
+
+## Deploy con Docker
+
+```bash
+# Build immagine
+docker build -t ufo-addon .
+
+# Avvia il container
+docker run -d \
+  -p 8080:8080 \
+  -e TMDB_KEY=la_tua_api_key \
+  -e EASYPROXY_URL=https://myproxy.example.com \
+  -e EASYPROXY_PASSWORD=password_opzionale \
+  --name ufo \
+  ufo-addon
+```
+
+Funziona su qualsiasi host con Docker: VPS, Orange Pi, Raspberry Pi, macchina locale.
 
 ---
 
 ## Aggiungere l'addon a Stremio
 
-Una volta deployato, copia l'URL del tuo servizio e aprilo nel browser.
-La risposta mostrerà il link al manifest:
+Apri nel browser l'URL del servizio. La risposta mostrerà il link al manifest:
 
 ```json
 {
   "status": "online",
   "addon": "UFO addon",
   "easyproxy": true,
-  "manifest": "https://<tuo-servizio>/U0MQ/manifest.json"
+  "manifest": "https://<tuo-servizio>/<ADDON_PATH>/manifest.json"
 }
 ```
 
-Incolla quel link manifest in Stremio → **Addon** → **Aggiungi addon tramite URL**.
+> Il valore di `<ADDON_PATH>` dipende dalla variabile d'ambiente `ADDON_PATH` (default: `U0MQ`).
+
+Incolla il link manifest in Stremio → **Addon** → **Aggiungi addon tramite URL**.
 
 ---
 
@@ -206,19 +229,23 @@ Incolla quel link manifest in Stremio → **Addon** → **Aggiungi addon tramite
 # Installa dipendenze
 pip install -r requirements.txt
 
-# Crea un file .env
-cp .env.example .env  # oppure crealo manualmente
+# Crea il file .env
+# (copia l'esempio qui sotto)
 
 # Avvia il server
-uvicorn api.index:app --reload --port 8000
+uvicorn api.index:app --reload --port 8080
 ```
 
 **Esempio `.env`:**
 ```env
-EASYPROXY_URL=https://myproxy.example.com
-EASYPROXY_PASSWORD=mysecretpassword
-
 TMDB_KEY=la_tua_api_key_tmdb
+EASYPROXY_URL=https://myproxy.example.com
+EASYPROXY_PASSWORD=password_opzionale
+
+# Opzionali
+# SC_DOMAIN=https://vixsrc.to
+# USER_AGENT=Mozilla/5.0 ...
+# ADDON_PATH=U0MQ
 ```
 
 ---
@@ -228,10 +255,10 @@ TMDB_KEY=la_tua_api_key_tmdb
 | Metodo | Path | Descrizione |
 |---|---|---|
 | `GET` | `/` | Status e link al manifest |
-| `GET` | `/U0MQ/manifest.json` | Manifest Stremio |
-| `GET` | `/U0MQ/stream/{type}/{id}.json` | Risoluzione stream |
-| `GET` | `/U0MQ/meta/{type}/{id}.json` | Metadati (stub) |
-| `GET` | `/U0MQ/catalog/{type}/{id}.json` | Catalogo (vuoto) |
+| `GET` | `/{ADDON_PATH}/manifest.json` | Manifest Stremio |
+| `GET` | `/{ADDON_PATH}/stream/{type}/{id}.json` | Risoluzione stream |
+| `GET` | `/{ADDON_PATH}/meta/{type}/{id}.json` | Metadati (stub) |
+| `GET` | `/{ADDON_PATH}/catalog/{type}/{id}.json` | Catalogo (vuoto) |
 
 ---
 
@@ -239,5 +266,5 @@ TMDB_KEY=la_tua_api_key_tmdb
 
 MIT License — vedi file [LICENSE](LICENSE) per i dettagli.
 
-Il software viene fornito **"as is"**, senza garanzie di alcun tipo, esplicite o implicite.
-L'autore non è responsabile per danni diretti, indiretti, incidentali o consequenziali derivanti dall'uso di questo software.
+Il software viene fornito **"as is"**, senza garanzie di alcun tipo.
+L'autore non è responsabile per danni derivanti dall'uso di questo software.
