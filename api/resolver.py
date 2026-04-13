@@ -2,19 +2,21 @@ import logging
 from typing import Dict
 from urllib.parse import quote
 
-from .config import SC_DOMAIN, EASYPROXY_URL, EASYPROXY_PSW
+from .config import SC_DOMAIN, EASYPROXY_PSW, get_proxy_base
 from .tmdb import get_tmdb_id
 
 logger = logging.getLogger(__name__)
 
 
-def build_easyproxy_url(vixsrc_page_url: str) -> str:
+def build_proxy_url(vixsrc_page_url: str) -> str:
     """
-    Costruisce l'URL EasyProxy nel formato:
-    EASYPROXY/proxy/hls/manifest.m3u8?d=<encoded_page_url>[&api_password=]
+    Costruisce l'URL del proxy HLS nel formato:
+    <proxy_base>/proxy/hls/manifest.m3u8?d=<encoded_page_url>[&api_password=]
+    Funziona sia con proxy esterno (EASYPROXY_URL) che integrato (self-hosted).
     """
+    base = get_proxy_base()
     encoded = quote(vixsrc_page_url, safe="")
-    url = f"{EASYPROXY_URL}/proxy/hls/manifest.m3u8?d={encoded}"
+    url = f"{base}/proxy/hls/manifest.m3u8?d={encoded}"
     if EASYPROXY_PSW:
         url += f"&api_password={quote(EASYPROXY_PSW, safe='')}"
     return url
@@ -41,16 +43,17 @@ async def get_streams(stremio_id: str, content_type: str) -> Dict:
         )
         logger.info(f"🎬 VixSrc page: {page_url}")
 
-        if not EASYPROXY_URL:
-            logger.error("❌ EASYPROXY_URL non configurato — nessuno stream possibile")
+        proxy_base = get_proxy_base()
+        if not proxy_base:
+            logger.error("❌ Proxy base URL non disponibile — aspetta la prima richiesta a /")
             return result
 
-        stream_url = build_easyproxy_url(page_url)
-        logger.info(f"✅ EasyProxy stream: {stream_url[:80]}...")
+        stream_url = build_proxy_url(page_url)
+        logger.info(f"✅ Proxy stream URL: {stream_url[:80]}...")
 
         result["streams"].append({
             "name": "🛸 UFO",
-            "title": "VixSrc • EasyProxy",
+            "title": "VixSrc · Proxy integrato",
             "url": stream_url,
             "behaviorHints": {
                 "notWebReady": False,
