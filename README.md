@@ -268,3 +268,62 @@ MIT License — vedi file [LICENSE](LICENSE) per i dettagli.
 
 Il software viene fornito **"as is"**, senza garanzie di alcun tipo.
 L'autore non è responsabile per danni derivanti dall'uso di questo software.
+
+---
+
+## 📋 Changelog
+
+### [1.4.0] — 2026-04-13
+> Sicurezza, performance e infrastruttura
+
+- **security**: rimosso il valore di fallback hardcodato della TMDB API key — la variabile `TMDB_KEY` è ora obbligatoria; `validate_config()` logga un warning all'avvio se mancante
+- **perf**: aggiunta cache in-memory per le risoluzioni IMDb → TMDB; aggiunta sessione HTTP condivisa (`AsyncSession`) creata una sola volta e chiusa nel `lifespan`
+- **feat**: `ADDON_PATH` configurabile via env var (default `U0MQ`); versione nel manifest leggibile da `config.py`
+- **chore**: dipendenze pinnate a versioni specifiche in `requirements.txt`; aggiunto `Dockerfile` basato su `python:3.12-slim`
+- **docs**: README aggiornato per riflettere porta `8080`, assenza di API key hardcodata e `validate_config()`; URL manifest nell'esempio corretto con `ADDON_PATH`
+
+### [1.3.0] — 2026-04-13
+> Consolidamento su EasyProxy + Koyeb
+
+- **feat**: adottato **EasyProxy** come unico proxy per gli stream HLS (`EASYPROXY_URL` + `EASYPROXY_PASSWORD`)
+- **config**: aggiunta variabile `EASYPROXY_URL`; rimossi tutti i riferimenti a MediaFlow
+- **chore**: rimosso `vercel.json` — deploy migrato definitivamente su **Koyeb**
+- **revert**: rimosso `proxy.py` integrato accidentalmente nel branch `main` (appartiene a `integrated-easyproxy`)
+- **docs**: README aggiornato — solo Koyeb e EasyProxy, rimossi i riferimenti a MediaFlow e Vercel
+
+### [1.2.0] — 2026-04-12
+> Refactor proxy: solo stream diretto, poi EasyProxy
+
+- **refactor**: rimossi EasyProxy e MediaFlow — lo stream veniva restituito direttamente a Stremio (PR #1 dal branch `test`)
+- **revert**: ripristinata la versione funzionante con solo EasyProxy dopo i test falliti con lo stream diretto
+
+### [1.1.0] — 2026-04-11
+> Dual-proxy, HLS multi-step e ridenominazione
+
+- **feat**: supporto dual-proxy — **EasyProxy** prioritario + **MediaFlow** come fallback con estrazione HLS multi-step da VixSrc
+- **feat**: aggiunto `vercel.json` per deploy su Vercel con MediaFlow via env vars
+- **feat**: proxy URL configurabile via pagina web (form HTML) invece di env var hardcodata
+- **fix**: sostituito `httpx` con `curl_cffi` per aggirare i blocchi anti-bot di VixSrc; corretta l'estrazione del manifest e il builder MediaFlow
+- **fix**: disabilitata la cache degli stream di Stremio per evitare token VixSrc scaduti
+- **fix**: CORS credentials conflict; token encoding robusto; `vercel.json` con header CORS
+- **fix**: import assoluti + `mangum` handler per compatibilità Vercel serverless
+- **fix**: HTML spostato in file statico per evitare conflitti con `str.format()` e regex `{N}`
+- **chore**: addon rinominato in **UFO 🇮🇹**, stream title rinominato da `VixSrc` a `Vix 🇮🇹`
+- **feat**: stream name e title arricchiti con titolo del contenuto e stagione/episodio
+
+### [1.0.0] — 2026-04-10
+> Prima versione stabile — refactor modulare
+
+- **refactor**: `index.py` monolitico suddiviso in moduli: `index.py`, `config.py`, `tmdb.py`, `resolver.py`
+- **feat**: proxy HLS integrato per aggirare il blocco IP datacenter (sostituisce temporaneamente MediaFlow); supporto `HEAD`, `EXT-X-KEY`, `EXT-X-MAP`, segmenti `.ts`/`.m4s`
+- **fix**: risoluzione M3U8 master playlist e base URL per i segmenti `.ts`
+- **chore**: rimosso `railway.json`; migrazione deploy da Railway a Koyeb; aggiunto `Procfile`
+- **docs**: aggiunto `README.md` con struttura del progetto, flusso dettagliato e istruzioni deploy; aggiunti disclaimer e note legali; aggiunto file `LICENSE` (MIT)
+
+### [0.1.0] — 2026-04-09
+> Proof of concept iniziale
+
+- **feat**: primo addon Stremio funzionante con FastAPI; risoluzione IMDb → TMDB ID tramite API TMDB; estrazione stream HLS da VixSrc con `curl_cffi` (impersonation Chrome)
+- **feat**: proxy HLS per `/playlist/` — riscrittura manifest M3U8 (URI segmenti, `EXT-X-KEY`, `EXT-X-MAP`); proxy `AES-128` encryption key
+- **fix**: cache disabilitata su tutte le route per evitare stream scaduti; regex precisa per `window.masterPlaylist`; supporto apici doppi e singoli
+- **chore**: aggiunto `Procfile` e configurazione Railway per il primo deploy cloud
