@@ -1,16 +1,25 @@
 import logging
+from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from .config import ADDON_NAME, ADDON_LOGO, EASYPROXY_URL
+from .config import ADDON_NAME, ADDON_LOGO, EASYPROXY_URL, validate_config
 from .resolver import get_streams
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logger = logging.getLogger(__name__)
 
-app = FastAPI(title=f"{ADDON_NAME} Addon")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    validate_config()
+    yield
+
+
+app = FastAPI(title=f"{ADDON_NAME} Addon", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -59,6 +68,7 @@ async def streams_route(type: str, id: str):
     try:
         data = await get_streams(id, type)
     except Exception:
+        logger.exception(f"❌ Errore non gestito in streams_route per id={id!r} type={type!r}")
         data = {"streams": []}
     return respond_with(data)
 
