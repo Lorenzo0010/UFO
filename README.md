@@ -213,9 +213,11 @@ Apri nel browser l'URL del servizio. La risposta mostrerà il link al manifest:
   "status": "online",
   "addon": "UFO addon",
   "easyproxy": true,
-  "manifest": "https://<tuo-servizio>/U0MQ/manifest.json"
+  "manifest": "https://<tuo-servizio>/<ADDON_PATH>/manifest.json"
 }
 ```
+
+> Il valore di `<ADDON_PATH>` dipende dalla variabile d'ambiente `ADDON_PATH` (default: `U0MQ`).
 
 Incolla il link manifest in Stremio → **Addon** → **Aggiungi addon tramite URL**.
 
