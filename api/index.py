@@ -8,6 +8,7 @@ from fastapi.responses import JSONResponse
 
 from .config import ADDON_NAME, ADDON_LOGO, EASYPROXY_URL, validate_config
 from .resolver import get_streams
+from .tmdb import close_session
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -17,6 +18,9 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     validate_config()
     yield
+    # Shutdown: chiude la sessione HTTP condivisa
+    await close_session()
+    logger.info("🔌 Sessione HTTP chiusa")
 
 
 app = FastAPI(title=f"{ADDON_NAME} Addon", lifespan=lifespan)
