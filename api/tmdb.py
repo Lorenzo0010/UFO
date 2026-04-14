@@ -1,5 +1,5 @@
 import logging
-from typing import Optional
+from typing import Optional, Tuple
 
 from curl_cffi.requests import AsyncSession
 
@@ -10,8 +10,11 @@ logger = logging.getLogger(__name__)
 # Sessione HTTP condivisa — creata una volta sola, riutilizzata per tutte le chiamate
 _session: Optional[AsyncSession] = None
 
-# Cache in-memory: chiave "(content_id, content_type)" → TMDB ID
-_tmdb_cache: dict[tuple[str, str], Optional[int]] = {}
+# Cache in-memory: chiave "(content_id, content_type)" → (TMDB ID, titolo)
+_tmdb_cache: dict[tuple[str, str], Optional[Tuple[int, str]]] = {}
+
+# Cache episodi: chiave "(tmdb_id, season, episode)" → titolo episodio
+_episode_cache: dict[tuple[int, str, str], Optional[str]] = {}
 
 
 def get_session() -> AsyncSession:
@@ -30,26 +33,26 @@ async def close_session() -> None:
         _session = None
 
 
-async def get_tmdb_id(content_id: str, content_type: str) -> Optional[int]:
-    """Risolve IMDb ID → TMDB ID con cache in-memory.
-    Se l'ID non inizia con 'tt' lo tratta già come TMDB ID.
+async def get_tmdb_info(content_id: str, content_type: str) -> Tuple[Optional[int], Optional[str]]:
+    """Risolve IMDb ID → (TMDB ID, titolo) con cache in-memory.
+    Se l'ID non inizia con 'tt' lo tratta già come TMDB ID (titolo None).
     """
-    # ID già numerico: nessuna chiamata necessaria
     if not content_id.startswith("tt"):
         try:
-            return int(content_id)
+            return int(content_id), None
         except ValueError:
-            return None
+            return None, None
 
     cache_key = (content_id, content_type)
 
-    # Cache hit
     if cache_key in _tmdb_cache:
-        logger.debug(f"🗃️  Cache hit TMDB per {content_id} ({content_type})")
-        return _tmdb_cache[cache_key]
+        logger.debug(f"\U0001f5c3\ufe0f  Cache hit TMDB per {content_id} ({content_type})")
+        cached = _tmdb_cache[cache_key]
+        if cached is None:
+            return None, None
+        return cached
 
-    # Cache miss — chiama l'API TMDB
-    result: Optional[int] = None
+    result: Optional[Tuple[int, str]] = None
     try:
         client = get_session()
         r = await client.get(
@@ -64,13 +67,49 @@ async def get_tmdb_id(content_id: str, content_type: str) -> Optional[int]:
             data = r.json()
             prefer   = "tv_results"    if content_type == "series" else "movie_results"
             fallback = "movie_results" if content_type == "series" else "tv_results"
+            entry = None
             if data.get(prefer):
-                result = data[prefer][0]["id"]
+                entry = data[prefer][0]
             elif data.get(fallback):
-                result = data[fallback][0]["id"]
+                entry = data[fallback][0]
+            if entry:
+                tmdb_id = entry["id"]
+                title = entry.get("title") or entry.get("name") or ""
+                result = (tmdb_id, title)
     except Exception as e:
-        logger.error(f"❌ TMDb error: {e}")
+        logger.error(f"\u274c TMDb error: {e}")
 
     _tmdb_cache[cache_key] = result
-    logger.debug(f"💾 Cache miss TMDB — salvato {content_id} → {result}")
+    logger.debug(f"\U0001f4be Cache miss TMDB — salvato {content_id} \u2192 {result}")
+    if result is None:
+        return None, None
     return result
+
+
+async def get_episode_title(tmdb_id: int, season: str, episode: str) -> Optional[str]:
+    """Recupera il titolo di un episodio specifico da TMDB con cache in-memory."""
+    cache_key = (tmdb_id, season, episode)
+    if cache_key in _episode_cache:
+        return _episode_cache[cache_key]
+
+    title: Optional[str] = None
+    try:
+        client = get_session()
+        r = await client.get(
+            f"https://api.themoviedb.org/3/tv/{tmdb_id}/season/{season}/episode/{episode}",
+            params={"api_key": TMDB_API_KEY, "language": "it"},
+        )
+        if r.status_code == 200:
+            data = r.json()
+            title = data.get("name") or None
+    except Exception as e:
+        logger.error(f"\u274c TMDb episode error: {e}")
+
+    _episode_cache[cache_key] = title
+    return title
+
+
+async def get_tmdb_id(content_id: str, content_type: str) -> Optional[int]:
+    """Compatibilità: restituisce solo il TMDB ID."""
+    tmdb_id, _ = await get_tmdb_info(content_id, content_type)
+    return tmdb_id
