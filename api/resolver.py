@@ -1,23 +1,13 @@
 """
-resolver.py — estrazione M3U8 da VixSrc/VixCloud + VidXgo via fetch HTTP puro.
+resolver.py — estrazione M3U8 da VixSrc/VixCloud via fetch HTTP puro.
 
-Logica VixSrc (invariata):
+Logica VixSrc:
   1. GET /api/tv/<tmdb>/<s>/<e> oppure /api/movie/<tmdb>  → JSON con campo "src"
   2. GET sull'URL embed restituito da "src" (con header Referer = pagina VixSrc)
   3. Trova lo script inline con token/expires/masterPlaylist
   4. Parsa e costruisce URL HLS finale
   5. Aggiunge &h=1 se canPlayFHD === true
 
-Logica VidXgo:
-  - Usa l'IMDB ID direttamente se content_id inizia con "tt",
-    altrimenti salta VidXgo (TMDB-only IDs non supportati da VidXgo)
-  - Film:  GET {VIDXGO_DOMAIN}/{imdb_id}
-  - Serie: GET {VIDXGO_DOMAIN}/{imdb_id}/{season}/{episode}
-  - Decripta il 6° script tag (XOR con chiave ciclica)
-  - Estrae l'URL HLS dal JS decriptato
-  - I segmenti richiedono header specifici → passati al proxy via ?headers=
-
-Le due estrazioni vengono lanciate in parallelo con asyncio.gather.
 Nessun Playwright, nessun browser headless. Puro httpx async.
 """
 
@@ -33,7 +23,6 @@ import httpx
 from .config import SC_DOMAIN, USER_AGENT
 from .proxy import encode_headers_b64
 from .tmdb import get_tmdb_info, get_episode_title
-from .vidxgo import fetch_vidxgo, VIDXGO_DEFAULT_DOMAIN
 
 logger = logging.getLogger(__name__)
 
@@ -216,7 +205,6 @@ async def _extract_m3u8_from_embed(embed_url: str, referer: str, client: httpx.A
     script_tag = None
     for m in re.finditer(r"<script[^>]*>([\s\S]*?)</script>", html, re.IGNORECASE):
         content = m.group(1)
-        # Cerca sia virgolette singole che doppie per token/expires
         if (re.search(r"['\"]token['\"]\s*:", content) and
                 re.search(r"['\"]expires['\"]\s*:", content)):
             script_tag = content
@@ -232,7 +220,6 @@ async def _extract_m3u8_from_embed(embed_url: str, referer: str, client: httpx.A
         logger.debug(f"[vixcloud] HTML embed (primi 2000 car): {html[:2000]}")
         return None
 
-    # Pattern con virgolette singole O doppie per token/expires/url
     token_m   = re.search(r"['\"]token['\"]\s*:\s*['\"]([\w-]+)['\"]", script_tag)
     expires_m = re.search(r"['\"]expires['\"]\s*:\s*['\"]?(\d+)['\"]?", script_tag)
     url_m     = re.search(r"url\s*:\s*['\"]([^'\"]+)['\"]", script_tag)
@@ -318,7 +305,6 @@ async def extract_m3u8(page_url: str) -> Optional[str]:
 
 async def get_streams(stremio_id: str, content_type: str, addon_base_url: str = "") -> Dict:
     result: Dict = {"streams": []}
-    vidxgo_client: Optional[httpx.AsyncClient] = None
     try:
         parts      = stremio_id.split(":")
         content_id = parts[0]
@@ -340,33 +326,7 @@ async def get_streams(stremio_id: str, content_type: str, addon_base_url: str = 
 
         logger.info(f"🎬 VixSrc page: {page_url}")
 
-        vidxgo_coro = None
-        if content_id.startswith("tt"):
-            imdb_id = content_id
-            if is_series:
-                vidxgo_embed_url = f"{VIDXGO_DEFAULT_DOMAIN}/{imdb_id}/{season}/{episode}"
-            else:
-                vidxgo_embed_url = f"{VIDXGO_DEFAULT_DOMAIN}/{imdb_id}"
-            logger.info(f"🎯 VidXgo embed: {vidxgo_embed_url}")
-            # IMPORTANTE: il client NON deve essere chiuso prima del gather.
-            # Creiamo il client senza 'async with' e lo chiudiamo manualmente nel finally.
-            vidxgo_client = httpx.AsyncClient(
-                timeout=httpx.Timeout(25.0),
-                follow_redirects=True,
-            )
-            vidxgo_coro = fetch_vidxgo(vidxgo_embed_url, vidxgo_client)
-        else:
-            logger.info(f"[VidXgo] content_id '{content_id}' non è un IMDB ID, VidXgo saltato")
-
-        if vidxgo_coro is not None:
-            vixcloud_m3u8, vidxgo_result = await asyncio.gather(
-                extract_m3u8(page_url),
-                vidxgo_coro,
-                return_exceptions=True,
-            )
-        else:
-            vixcloud_m3u8 = await extract_m3u8(page_url)
-            vidxgo_result = None
+        vixcloud_m3u8 = await extract_m3u8(page_url)
 
         if is_series and ep_title_task:
             content_label = (await ep_title_task) or tmdb_title or ""
@@ -385,25 +345,6 @@ async def get_streams(stremio_id: str, content_type: str, addon_base_url: str = 
         else:
             logger.error(f"❌ VixCloud: impossibile estrarre M3U8 per {page_url}")
 
-        if isinstance(vidxgo_result, dict) and vidxgo_result:
-            vidxgo_stream_url = build_proxy_url(
-                vidxgo_result["m3u8"],
-                addon_base_url,
-                extra_headers=vidxgo_result["playback_headers"],
-            )
-            logger.info(f"✅ VidXgo stream: {vidxgo_stream_url[:80]}...")
-            result["streams"].append({
-                "name": "UFO\n🎯 VidXgo",
-                "title": content_label,
-                "url": vidxgo_stream_url,
-                "behaviorHints": {"notWebReady": True, "bingeGroup": "ufo-vidxgo"},
-            })
-        elif vidxgo_coro is not None:
-            logger.warning(f"[VidXgo] estrazione fallita per {content_id}")
-
     except Exception as e:
         logger.error(f"❌ get_streams error: {e}")
-    finally:
-        if vidxgo_client is not None:
-            await vidxgo_client.aclose()
     return result
