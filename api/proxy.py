@@ -2,9 +2,10 @@
 proxy.py — Proxy HLS interno per UFO.
 
 Fix applicati:
-  1. Aggiunta route HEAD /proxy/manifest.m3u8 → Stremio non riceve più 405
-  2. _rewrite_manifest ora riscrive anche URI in #EXT-X-KEY → enc.key non
-     viene più cercato localmente ma proxiato da vixsrc.to
+  1. HEAD /proxy/manifest.m3u8 → risponde 200 (Stremio non riceve più 405)
+  2. _rewrite_manifest riscrive URI in #EXT-X-KEY, #EXT-X-MAP, ecc.
+  3. /proxy/segment rileva sub-playlist M3U8 (anche senza .m3u8 nell'URL)
+     e le riscrive prima di restituirle → enc.key proxiato correttamente
 """
 
 import logging
@@ -33,6 +34,13 @@ _PROXY_HEADERS = {
 _TIMEOUT = httpx.Timeout(30.0)
 _client: httpx.AsyncClient | None = None
 
+_M3U8_CONTENT_TYPES = {
+    "application/vnd.apple.mpegurl",
+    "application/x-mpegurl",
+    "audio/mpegurl",
+    "audio/x-mpegurl",
+}
+
 
 def get_client() -> httpx.AsyncClient:
     global _client
@@ -48,11 +56,21 @@ async def close_proxy_client() -> None:
         _client = None
 
 
+def _is_m3u8_content(content_type: str, body: str) -> bool:
+    """Rileva se la risposta è un manifest M3U8 anche quando l'URL non ha .m3u8."""
+    ct = content_type.split(";")[0].strip().lower()
+    if ct in _M3U8_CONTENT_TYPES:
+        return True
+    # Fallback: controlla il contenuto (VixSrc serve sub-playlist come text/plain)
+    return body.lstrip().startswith("#EXTM3U")
+
+
 def _rewrite_manifest(content: str, original_url: str, proxy_base: str) -> str:
     """
     Riscrive un manifest M3U8 sostituendo tutti gli URL con URL proxy.
+    Gestisce:
     - Righe URL (segmenti, variant playlist)
-    - URI="..." in qualsiasi direttiva (#EXT-X-MAP, #EXT-X-KEY, ecc.)
+    - URI="..." in qualsiasi direttiva (#EXT-X-KEY, #EXT-X-MAP, #EXT-X-MEDIA, ecc.)
     """
     lines = content.splitlines(keepends=True)
     rewritten = []
@@ -72,8 +90,6 @@ def _rewrite_manifest(content: str, original_url: str, proxy_base: str) -> str:
             continue
 
         if stripped.startswith("#"):
-            # Riscrive tutti gli URI="..." nelle direttive HLS
-            # Copre: #EXT-X-KEY, #EXT-X-MAP, #EXT-X-MEDIA, ecc.
             if 'URI="' in stripped:
                 line = re.sub(
                     r'URI="([^"]+)"',
@@ -100,7 +116,7 @@ def _proxy_base(request: Request) -> str:
     return f"{base}/proxy"
 
 
-# ── HEAD: risponde 200 con gli stessi header del GET ─────────────────────────
+# ── HEAD manifest ─────────────────────────────────────────────────────────────
 @router.head("/manifest.m3u8")
 async def proxy_manifest_head(url: str, request: Request):
     """Risponde alle richieste HEAD di Stremio senza fetchare il manifest."""
@@ -109,17 +125,14 @@ async def proxy_manifest_head(url: str, request: Request):
     return Response(
         content=b"",
         media_type="application/vnd.apple.mpegurl",
-        headers={
-            "Access-Control-Allow-Origin": "*",
-            "Cache-Control": "no-cache",
-        },
+        headers={"Access-Control-Allow-Origin": "*", "Cache-Control": "no-cache"},
     )
 
 
 # ── GET manifest ──────────────────────────────────────────────────────────────
 @router.get("/manifest.m3u8")
 async def proxy_manifest(url: str, request: Request):
-    """Fetcha e riscrive un manifest M3U8."""
+    """Fetcha e riscrive un manifest M3U8 (master o media playlist)."""
     if not url:
         raise HTTPException(status_code=400, detail="Parametro 'url' mancante")
 
@@ -137,10 +150,7 @@ async def proxy_manifest(url: str, request: Request):
         return Response(
             content=rewritten,
             media_type="application/vnd.apple.mpegurl",
-            headers={
-                "Access-Control-Allow-Origin": "*",
-                "Cache-Control": "no-cache",
-            },
+            headers={"Access-Control-Allow-Origin": "*", "Cache-Control": "no-cache"},
         )
     except httpx.RequestError as e:
         logger.error(f"[proxy] manifest request error: {e}")
@@ -149,8 +159,12 @@ async def proxy_manifest(url: str, request: Request):
 
 # ── GET segmento ──────────────────────────────────────────────────────────────
 @router.get("/segment")
-async def proxy_segment(url: str):
-    """Proxia un singolo segmento media (.ts, .aac, chiave AES, ecc.) in streaming."""
+async def proxy_segment(url: str, request: Request):
+    """
+    Proxia segmenti media (.ts, .aac, chiave AES, ecc.).
+    Se la risposta upstream è un M3U8 (sub-playlist senza estensione .m3u8),
+    la riscrive prima di restituirla — così l'enc.key viene proxiato.
+    """
     if not url:
         raise HTTPException(status_code=400, detail="Parametro 'url' mancante")
 
@@ -158,29 +172,34 @@ async def proxy_segment(url: str):
     client = get_client()
 
     try:
-        req = client.build_request("GET", url, headers=_PROXY_HEADERS)
-        resp = await client.send(req, stream=True)
+        resp = await client.get(url, headers=_PROXY_HEADERS)
 
         if resp.status_code not in (200, 206):
-            await resp.aclose()
             logger.warning(f"[proxy] segment HTTP {resp.status_code} per {url[:80]}")
             raise HTTPException(status_code=resp.status_code, detail="Upstream error")
 
         content_type = resp.headers.get("content-type", "video/MP2T")
+        body = resp.text
 
+        # Sub-playlist M3U8 senza .m3u8 nell'URL (es. /playlist/123?type=video&rendition=480p)
+        if _is_m3u8_content(content_type, body):
+            logger.debug(f"[proxy] sub-playlist rilevata, riscrittura: {url[:80]}")
+            rewritten = _rewrite_manifest(body, url, _proxy_base(request))
+            return Response(
+                content=rewritten,
+                media_type="application/vnd.apple.mpegurl",
+                headers={"Access-Control-Allow-Origin": "*", "Cache-Control": "no-cache"},
+            )
+
+        # Segmento binario normale → streaming
         async def stream_chunks():
-            async for chunk in resp.aiter_bytes(chunk_size=65536):
-                yield chunk
-            await resp.aclose()
+            yield resp.content
 
         return StreamingResponse(
             stream_chunks(),
             status_code=resp.status_code,
             media_type=content_type,
-            headers={
-                "Access-Control-Allow-Origin": "*",
-                "Cache-Control": "no-cache",
-            },
+            headers={"Access-Control-Allow-Origin": "*", "Cache-Control": "no-cache"},
         )
     except httpx.RequestError as e:
         logger.error(f"[proxy] segment request error: {e}")
