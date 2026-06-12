@@ -11,7 +11,8 @@ Logica VixSrc (invariata):
 Logica VidXgo (nuova):
   - Usa l'IMDB ID direttamente se content_id inizia con "tt",
     altrimenti salta VidXgo (TMDB-only IDs non supportati da VidXgo)
-  - GET {VIDXGO_DOMAIN}/{imdb_id} con UA Firefox-150
+  - Film:  GET {VIDXGO_DOMAIN}/{imdb_id}
+  - Serie: GET {VIDXGO_DOMAIN}/{imdb_id}/{season}/{episode}
   - Decripta il 6° script tag (XOR con chiave ciclica)
   - Estrae l'URL HLS dal JS decriptato
   - I segmenti richiedono header specifici → passati al proxy via ?headers=
@@ -215,7 +216,9 @@ async def _extract_m3u8_from_embed(embed_url: str, referer: str, client: httpx.A
     script_tag = None
     for m in re.finditer(r"<script[^>]*>([\s\S]*?)</script>", html, re.IGNORECASE):
         content = m.group(1)
-        if "'token':" in content and "'expires':" in content:
+        # Cerca sia virgolette singole che doppie per token/expires
+        if (re.search(r"['\"]token['\"]\s*:", content) and
+                re.search(r"['\"]expires['\"]\s*:", content)):
             script_tag = content
             break
     if not script_tag:
@@ -226,11 +229,13 @@ async def _extract_m3u8_from_embed(embed_url: str, referer: str, client: httpx.A
 
     if not script_tag:
         logger.warning(f"[vixcloud] Nessuno script con token/masterPlaylist in {embed_url[:80]}")
+        logger.debug(f"[vixcloud] HTML embed (primi 2000 car): {html[:2000]}")
         return None
 
-    token_m   = re.search(r"'token'\s*:\s*'(\w+)'", script_tag)
-    expires_m = re.search(r"'expires'\s*:\s*'(\d+)'", script_tag)
-    url_m     = re.search(r"url\s*:\s*'([^']+)'", script_tag)
+    # Pattern con virgolette singole O doppie per token/expires/url
+    token_m   = re.search(r"['\"]token['\"]\s*:\s*['\"]([\w-]+)['\"]", script_tag)
+    expires_m = re.search(r"['\"]expires['\"]\s*:\s*['\"]?(\d+)['\"]?", script_tag)
+    url_m     = re.search(r"url\s*:\s*['\"]([^'\"]+)['\"]", script_tag)
 
     if token_m and expires_m and url_m:
         token      = token_m.group(1)
@@ -248,7 +253,7 @@ async def _extract_m3u8_from_embed(embed_url: str, referer: str, client: httpx.A
         params.append(f"token={quote(token, safe='')}")
         params.append(f"expires={quote(expires, safe='')}")
 
-        fhd = bool(re.search(r"window\.canPlayFHD\s*=\s*true", script_tag))
+        fhd = bool(re.search(r"['\"]?canPlayFHD['\"]?\s*[=:]\s*true", script_tag))
         if fhd:
             params.append("h=1")
 
@@ -337,7 +342,11 @@ async def get_streams(stremio_id: str, content_type: str, addon_base_url: str = 
         vidxgo_task = None
         if content_id.startswith("tt"):
             imdb_id = content_id
-            vidxgo_embed_url = f"{VIDXGO_DEFAULT_DOMAIN}/{imdb_id}"
+            # FIX: per le serie passa season/episode nell'URL VidXgo
+            if is_series:
+                vidxgo_embed_url = f"{VIDXGO_DEFAULT_DOMAIN}/{imdb_id}/{season}/{episode}"
+            else:
+                vidxgo_embed_url = f"{VIDXGO_DEFAULT_DOMAIN}/{imdb_id}"
             logger.info(f"🎯 VidXgo embed: {vidxgo_embed_url}")
             async with httpx.AsyncClient(timeout=httpx.Timeout(20.0), follow_redirects=True) as vidxgo_client:
                 vidxgo_task = asyncio.create_task(
