@@ -37,14 +37,33 @@ _HEADERS = {
 
 _TIMEOUT = httpx.Timeout(20.0)
 
+# Referer e Origin che VixSrc si aspetta sui propri segmenti HLS
+_VIXSRC_REFERER = "https://vixsrc.to/"
+_VIXSRC_ORIGIN  = "https://vixsrc.to"
+
 
 # ---------------------------------------------------------------------------
 # EasyProxy helper
 # ---------------------------------------------------------------------------
 
 def build_easyproxy_url(m3u8_url: str) -> str:
+    """
+    Costruisce l'URL EasyProxy aggiungendo:
+      - d=<m3u8_url>          URL del manifest HLS
+      - h_referer=            Referer richiesto da vixsrc.to per validare i token
+      - h_origin=             Origin richiesto da vixsrc.to
+      - api_password=         (se configurata)
+    """
     encoded = quote(m3u8_url, safe="")
-    url = f"{EASYPROXY_URL}/proxy/hls/manifest.m3u8?d={encoded}"
+    referer_enc = quote(_VIXSRC_REFERER, safe="")
+    origin_enc  = quote(_VIXSRC_ORIGIN,  safe="")
+
+    url = (
+        f"{EASYPROXY_URL}/proxy/hls/manifest.m3u8"
+        f"?d={encoded}"
+        f"&h_referer={referer_enc}"
+        f"&h_origin={origin_enc}"
+    )
     if EASYPROXY_PSW:
         url += f"&api_password={quote(EASYPROXY_PSW, safe='')}"
     return url
@@ -113,7 +132,6 @@ async def _get_vixcloud_embed(vixsrc_url: str, client: httpx.AsyncClient) -> Opt
         content_type = page_resp.headers.get("content-type", "")
 
         if "application/json" in content_type:
-            # Risposta Inertia JSON
             try:
                 inertia_data = page_resp.json()
                 props = inertia_data.get("props", {})
@@ -127,7 +145,6 @@ async def _get_vixcloud_embed(vixsrc_url: str, client: httpx.AsyncClient) -> Opt
                 logger.debug(f"[vixsrc] Inertia JSON parse error: {e}")
         else:
             html = page_resp.text
-            # Cerca nell'attributo data-page del div#app
             m = re.search(r'id="app"[^>]+data-page="([^"]+)"', html)
             if not m:
                 m = re.search(r"data-page='([^']+)'", html)
@@ -145,7 +162,6 @@ async def _get_vixcloud_embed(vixsrc_url: str, client: httpx.AsyncClient) -> Opt
                 except Exception as e:
                     logger.debug(f"[vixsrc] data-page parse error: {e}")
 
-            # Ultimo fallback: cerca <iframe src="...vixcloud..."> nell'HTML
             mi = re.search(r'<iframe[^>]+src=["\']((?:https?:)?//[^"\']*vixcloud[^"\']*)["\']', html, re.IGNORECASE)
             if mi:
                 embed_url = mi.group(1)
@@ -172,12 +188,7 @@ async def _get_vixcloud_embed(vixsrc_url: str, client: httpx.AsyncClient) -> Opt
 # ---------------------------------------------------------------------------
 
 def _sanitise_and_parse_window_vars(script: str) -> Optional[dict]:
-    """
-    Replica getSanitisedScript() di vixcloud.ts:
-    split su ogni `window.VAR = ` e ricostruisce un JSON aggregato.
-    """
     raw = script.replace("\n", "\t")
-
     key_re = re.compile(r"window\.(\w+)\s*=\s*")
     keys = key_re.findall(raw)
     value_parts = re.split(r"window\.\w+\s*=\s*", raw)[1:]
@@ -188,16 +199,13 @@ def _sanitise_and_parse_window_vars(script: str) -> Optional[dict]:
 
     json_objects = []
     for key, part in zip(keys, value_parts):
-        cleaned = part
-        cleaned = re.sub(r";", "", cleaned)
+        cleaned = re.sub(r";", "", part)
         cleaned = re.sub(r'([{\[,])\s*(\w+)\s*:', r'\1 "\2":', cleaned)
         cleaned = re.sub(r",(\s*[}\]])", r"\1", cleaned)
-        cleaned = cleaned.strip()
-        cleaned = cleaned.replace("'", '"')
+        cleaned = cleaned.strip().replace("'", '"')
         json_objects.append(f'"{key}": {cleaned}')
 
     aggregated = "{\n" + ",\n".join(json_objects) + "\n}"
-
     try:
         return json.loads(aggregated)
     except json.JSONDecodeError as e:
@@ -206,10 +214,6 @@ def _sanitise_and_parse_window_vars(script: str) -> Optional[dict]:
 
 
 async def _extract_m3u8_from_embed(embed_url: str, referer: str, client: httpx.AsyncClient) -> Optional[str]:
-    """
-    Porta diretta di VixCloudHlsExtractor.extract() da extractor.ts.
-    Fetcha l'embed con Referer = pagina VixSrc originale.
-    """
     headers = {
         **_HEADERS,
         "Referer": referer,
@@ -219,7 +223,6 @@ async def _extract_m3u8_from_embed(embed_url: str, referer: str, client: httpx.A
     resp.raise_for_status()
     html = resp.text
 
-    # Cerca il <script> che contiene token/expires (pattern streamvix)
     script_tag = None
     for m in re.finditer(r"<script[^>]*>([\s\S]*?)</script>", html, re.IGNORECASE):
         content = m.group(1)
@@ -227,7 +230,6 @@ async def _extract_m3u8_from_embed(embed_url: str, referer: str, client: httpx.A
             script_tag = content
             break
     if not script_tag:
-        # Fallback: script con masterPlaylist
         for m in re.finditer(r"<script[^>]*>([\s\S]*?)</script>", html, re.IGNORECASE):
             if "masterPlaylist" in m.group(1):
                 script_tag = m.group(1)
@@ -237,26 +239,20 @@ async def _extract_m3u8_from_embed(embed_url: str, referer: str, client: httpx.A
         logger.warning(f"[vixcloud] Nessuno script con token/masterPlaylist in {embed_url[:80]}")
         return None
 
-    # --- Pattern streamvix: 'token': 'xxx', 'expires': 'xxx', url: 'xxx' ---
-    token_m = re.search(r"'token'\s*:\s*'(\w+)'", script_tag)
+    token_m   = re.search(r"'token'\s*:\s*'(\w+)'", script_tag)
     expires_m = re.search(r"'expires'\s*:\s*'(\d+)'", script_tag)
-    url_m = re.search(r"url\s*:\s*'([^']+)'", script_tag)
+    url_m     = re.search(r"url\s*:\s*'([^']+)'", script_tag)
 
     if token_m and expires_m and url_m:
-        token = token_m.group(1)
-        expires = expires_m.group(1)
+        token      = token_m.group(1)
+        expires    = expires_m.group(1)
         server_url = url_m.group(1)
 
-        # Assicura .m3u8 nel path
         before_q = server_url.split("?")[0]
         if not re.search(r"\.m3u8$", before_q, re.IGNORECASE):
             server_url = before_q.rstrip("/") + ".m3u8"
 
-        # Componi query: b (se presente), token, expires, h (se FHD)
-        parsed_srv = urlparse(server_url)
-        # cerca b=1 nell'URL originale
-        had_b = "b=1" in (url_m.group(1))
-
+        had_b  = "b=1" in url_m.group(1)
         params = []
         if had_b:
             params.append("b=1")
@@ -271,14 +267,14 @@ async def _extract_m3u8_from_embed(embed_url: str, referer: str, client: httpx.A
         logger.info(f"✅ VixCloud M3U8 (token pattern): {final_url[:120]}")
         return final_url
 
-    # Fallback: pattern masterPlaylist (vecchio embed)
+    # Fallback masterPlaylist
     parsed = _sanitise_and_parse_window_vars(script_tag)
     if parsed:
         master = parsed.get("masterPlaylist")
         if master:
             base_url: str = master.get("url", "")
-            params_obj = master.get("params", {}) or {}
-            token = params_obj.get("token", "")
+            params_obj    = master.get("params", {}) or {}
+            token   = params_obj.get("token", "")
             expires = params_obj.get("expires", "")
 
             before_query = base_url.split("?")[0]
@@ -288,14 +284,12 @@ async def _extract_m3u8_from_embed(embed_url: str, referer: str, client: httpx.A
             param_str = f"token={quote(str(token), safe='')}&expires={quote(str(expires), safe='')}"
             separator = "&" if "?" in base_url else "?"
             final_url = base_url + separator + param_str
-
             if parsed.get("canPlayFHD") is True:
                 final_url += "&h=1"
 
             logger.info(f"✅ VixCloud M3U8 (masterPlaylist): {final_url[:120]}")
             return final_url
 
-    # Ultimo fallback: regex diretta su URL .m3u8
     m = re.search(r'"url"\s*:\s*"([^"]+\.m3u8[^"]*)"', script_tag)
     if m:
         logger.info(f"[vixcloud] Fallback regex URL: {m.group(1)[:80]}")
@@ -310,10 +304,6 @@ async def _extract_m3u8_from_embed(embed_url: str, referer: str, client: httpx.A
 # ---------------------------------------------------------------------------
 
 async def extract_m3u8(page_url: str) -> Optional[str]:
-    """
-    Dato un URL VixSrc (/tv/... o /movie/...) restituisce l'URL M3U8 HLS.
-    Usa fetch HTTP puro (niente browser headless).
-    """
     async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
         try:
             embed_url = await _get_vixcloud_embed(page_url, client)
@@ -336,11 +326,11 @@ async def extract_m3u8(page_url: str) -> Optional[str]:
 async def get_streams(stremio_id: str, content_type: str) -> Dict:
     result: Dict = {"streams": []}
     try:
-        parts = stremio_id.split(":")
+        parts      = stremio_id.split(":")
         content_id = parts[0]
-        season = parts[1] if len(parts) > 1 else None
-        episode = parts[2] if len(parts) > 2 else None
-        is_series = content_type == "series" and season and episode
+        season     = parts[1] if len(parts) > 1 else None
+        episode    = parts[2] if len(parts) > 2 else None
+        is_series  = content_type == "series" and season and episode
 
         if is_series:
             tmdb_id, tmdb_title = await get_tmdb_info(content_id, content_type)
@@ -357,7 +347,7 @@ async def get_streams(stremio_id: str, content_type: str) -> Dict:
 
             ep_title_task = asyncio.create_task(get_episode_title(tmdb_id, season, episode))
             real_m3u8 = await extract_m3u8(page_url)
-            ep_title = await ep_title_task
+            ep_title  = await ep_title_task
             content_label = ep_title or tmdb_title or ""
         else:
             tmdb_id, tmdb_title = await get_tmdb_info(content_id, content_type)
@@ -372,7 +362,7 @@ async def get_streams(stremio_id: str, content_type: str) -> Dict:
                 logger.error("❌ EASYPROXY_URL non configurato")
                 return result
 
-            real_m3u8 = await extract_m3u8(page_url)
+            real_m3u8     = await extract_m3u8(page_url)
             content_label = tmdb_title or "Film"
 
         if not real_m3u8:
