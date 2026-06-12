@@ -1,23 +1,16 @@
 """
 resolver.py — estrazione M3U8 da VixSrc/VixCloud.
 
-Logica identica a StreamVix (extractor.ts), portata in Python:
-
+Flusso:
   1. GET /api/tv/<tmdb>/<s>/<e>  oppure  /api/movie/<tmdb>
-     → JSON con campo "src" che contiene l’URL embed VixCloud
-  2. GET sull’embed con header Referer/Origin corretti
+     → JSON con campo "src" che contiene l'URL embed VixCloud
+  2. GET sull'embed con header Referer/Origin corretti
   3. Trova lo script inline con 'token'/'expires'/url (pattern o masterPlaylist)
-  4. Costruisce URL HLS finale: [b=1,] token=, expires=, [h=1 se canPlayFHD]
-  5. Verifica HEAD sull’URL VixSrc (checkUrlExists) — skip se VIXSRC_SKIP_LIST_CHECK=1
+  4. Costruisce URL HLS finale: token=, expires=, [h=1 se canPlayFHD]
+  5. Verifica HEAD sull'URL VixSrc (checkUrlExists) — skip se VIXSRC_SKIP_LIST_CHECK=1
 
-Proxy round-robin (identico a StreamVix):
-  - Env: PROXY  e  PROXY_BACKUP  (http/https/socks5)
-  - Attivo solo quando get_streams è chiamato in “proxy mode”
-  - Ogni chiamata vixsrc_fetch() tenta prima il diretto (timeout 1.5s),
-    poi round-robin PROXY/PROXY_BACKUP, poi l’alternativo
-  - Status bloccati: 0, 401, 403, 429, 5xx
-
-Nessun Playwright, nessun browser headless. Solo httpx + curl_cffi.
+I segmenti HLS vengono proxiati dal proxy interno (proxy.py) che aggiunge
+automaticamente i Referer/Origin VixSrc corretti.
 """
 
 from __future__ import annotations
@@ -27,7 +20,7 @@ import json
 import logging
 import os
 import re
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 from urllib.parse import quote, urlparse
 
 import httpx
@@ -53,161 +46,15 @@ _HEADERS: dict = {
 }
 
 _TIMEOUT = httpx.Timeout(20.0)
-_DIRECT_TIMEOUT = 1.5   # secondi per il tentativo diretto in proxy-mode
 
 _IFRAME_VIXCLOUD_RE = re.compile(
     r'<iframe[^>]+src=["\']([^"\']*vixcloud[^"\']*)["\']',
     re.IGNORECASE,
 )
 
-# ---------------------------------------------------------------------------
-# Stato modulo: proxy round-robin (replica __vixProxyRRCounter di StreamVix)
-# ---------------------------------------------------------------------------
-
-_proxy_rr_counter: int = 0
-_proxy_mode_active: bool = False   # attivato da get_streams() se richiesto
-
-
-def _get_proxy_env() -> Optional[str]:
-    """Round-robin tra PROXY e PROXY_BACKUP (replica __vixGetProxyEnv)."""
-    global _proxy_rr_counter
-    primary = os.getenv("PROXY", "").strip()
-    backup  = os.getenv("PROXY_BACKUP", "").strip()
-    pool    = [v for v in (primary, backup) if v]
-    if not pool:
-        return None
-    if len(pool) == 1:
-        return pool[0]
-    chosen = pool[_proxy_rr_counter % len(pool)]
-    _proxy_rr_counter = (_proxy_rr_counter + 1) % 1_000_000
-    return chosen
-
-
-def _get_alternate_proxy(current: str) -> Optional[str]:
-    primary = os.getenv("PROXY", "").strip()
-    backup  = os.getenv("PROXY_BACKUP", "").strip()
-    if current == primary and backup:
-        return backup
-    if current == backup and primary:
-        return primary
-    return None
-
-
-def _is_blocked_status(s: int) -> bool:
-    return s in (0, 401, 403, 429) or (500 <= s < 600)
-
-
-def _mask_proxy(u: str) -> str:
-    try:
-        p = urlparse(u)
-        return f"{p.scheme}//***@{p.hostname}{':{}'.format(p.port) if p.port else ''}"
-    except Exception:
-        return re.sub(r":[^:@]+@", ":***@", u)
-
-
-async def _proxy_request_once(
-    url: str,
-    method: str,
-    headers: dict,
-    proxy_url: str,
-    body: Optional[bytes] = None,
-) -> Optional[httpx.Response]:
-    """Esegue una richiesta HTTP tramite proxy HTTP/S o SOCKS5."""
-    try:
-        if proxy_url.startswith("socks"):
-            # curl_cffi supporta proxy SOCKS5 nativamente
-            try:
-                from curl_cffi.requests import AsyncSession
-                async with AsyncSession() as s:
-                    r = await s.request(
-                        method,
-                        url,
-                        headers=headers,
-                        content=body,
-                        proxies={"http": proxy_url, "https": proxy_url},
-                        timeout=20,
-                        allow_redirects=True,
-                    )
-                    # Costruisce una httpx.Response-compatibile
-                    return httpx.Response(
-                        status_code=r.status_code,
-                        headers=dict(r.headers),
-                        content=r.content,
-                    )
-            except Exception as e:
-                logger.warning(f"[Proxy][SOCKS] {_mask_proxy(proxy_url)} errore: {e}")
-                return None
-        else:
-            transport = httpx.AsyncHTTPTransport(proxy=proxy_url)
-            async with httpx.AsyncClient(transport=transport, timeout=httpx.Timeout(20.0), follow_redirects=True) as client:
-                req_kwargs: dict = {"headers": headers}
-                if body:
-                    req_kwargs["content"] = body
-                return await client.request(method, url, **req_kwargs)
-    except Exception as e:
-        logger.warning(f"[Proxy] {_mask_proxy(proxy_url)} errore per {url}: {e}")
-        return None
-
-
-async def vixsrc_fetch(
-    url: str,
-    method: str = "GET",
-    headers: Optional[dict] = None,
-    body: Optional[bytes] = None,
-) -> httpx.Response:
-    """
-    Drop-in replacement per httpx.get/head usato in tutti i punti vixsrc/vixcloud.
-    Replica esatta di vixsrcFetch() di StreamVix:
-      1. Tenta diretto con timeout 1.5s se proxy_mode attivo
-      2. Se bloccato/errore -> round-robin PROXY/PROXY_BACKUP
-      3. Se primo proxy fallisce -> tenta l’alternativo
-    In modalità non-proxy: comportamento normale.
-    """
-    h = {**_HEADERS, **(headers or {})}
-    proxy_url = _get_proxy_env() if _proxy_mode_active else None
-    active = _proxy_mode_active and bool(proxy_url)
-
-    if not active:
-        async with httpx.AsyncClient(timeout=_TIMEOUT, follow_redirects=True) as client:
-            return await client.request(method, url, headers=h, content=body)
-
-    # 1) Tentativo diretto con timeout stretto
-    direct: Optional[httpx.Response] = None
-    try:
-        async with httpx.AsyncClient(
-            timeout=httpx.Timeout(_DIRECT_TIMEOUT), follow_redirects=True
-        ) as client:
-            direct = await client.request(method, url, headers=h, content=body)
-    except Exception:
-        direct = None
-
-    if direct and not _is_blocked_status(direct.status_code):
-        return direct
-
-    # 2) Fallback proxy round-robin
-    logger.debug(f"[VixSrc][Proxy] fallback via {_mask_proxy(proxy_url)} per {url}")
-    via_proxy = await _proxy_request_once(url, method, h, proxy_url, body)
-    if via_proxy and not _is_blocked_status(via_proxy.status_code):
-        return via_proxy
-
-    # 3) Proxy alternativo
-    alt = _get_alternate_proxy(proxy_url)
-    if alt:
-        logger.debug(f"[VixSrc][Proxy] retry via {_mask_proxy(alt)} per {url}")
-        via_alt = await _proxy_request_once(url, method, h, alt, body)
-        if via_alt:
-            return via_alt
-
-    # Tutti falliti: ritorna il meglio che abbiamo
-    if via_proxy:
-        return via_proxy
-    if direct:
-        return direct
-    raise RuntimeError(f"[VixSrc][Proxy] tutti i tentativi falliti per {url}")
-
 
 # ---------------------------------------------------------------------------
-# checkUrlExists (replica di StreamVix)
+# checkUrlExists
 # ---------------------------------------------------------------------------
 
 async def check_url_exists(url: str) -> bool:
@@ -226,15 +73,15 @@ async def check_url_exists(url: str) -> bool:
     }
 
     try:
-        resp = await vixsrc_fetch(url, method="HEAD", headers=head_headers)
+        async with httpx.AsyncClient(timeout=_TIMEOUT, follow_redirects=True) as client:
+            resp = await client.head(url, headers=head_headers)
         if resp.status_code in range(200, 400):
             logger.info(f"[VixSrc][Check] OK ({resp.status_code}) -> {url}")
             return True
-        # 404 legittimo
-        if not _is_blocked_status(resp.status_code):
-            logger.info(f"[VixSrc][Check] Fail ({resp.status_code}) -> {url}")
+        if resp.status_code == 404:
+            logger.info(f"[VixSrc][Check] 404 -> {url}")
             return False
-        # Status bloccato: assume True per evitare falsi negativi
+        # Status bloccato (403, 429, 5xx): assume True per evitare falsi negativi
         logger.warning(f"[VixSrc][Check] Status bloccato ({resp.status_code}), assumo esistente")
         return True
     except Exception as e:
@@ -246,17 +93,10 @@ async def check_url_exists(url: str) -> bool:
 # build_proxy_url
 # ---------------------------------------------------------------------------
 
-def build_proxy_url(
-    m3u8_url: str,
-    addon_base_url: str,
-    extra_headers: Optional[dict] = None,
-) -> str:
+def build_proxy_url(m3u8_url: str, addon_base_url: str) -> str:
     base    = addon_base_url.rstrip("/")
     encoded = quote(m3u8_url, safe="")
-    url     = f"{base}/proxy/manifest.m3u8?url={encoded}"
-    if extra_headers:
-        url += f"&headers={quote(encode_headers_b64(extra_headers), safe='')}"
-    return url
+    return f"{base}/proxy/manifest.m3u8?url={encoded}"
 
 
 # ---------------------------------------------------------------------------
@@ -264,7 +104,7 @@ def build_proxy_url(
 # ---------------------------------------------------------------------------
 
 def _ensure_m3u8(raw: str) -> str:
-    """Aggiunge .m3u8 al path /playlist/<id> se mancante (replica ensurePlaylistM3u8)."""
+    """Aggiunge .m3u8 al path /playlist/<id> se mancante."""
     try:
         if "/playlist/" not in raw:
             return raw
@@ -292,7 +132,7 @@ async def _get_vixcloud_embed(vixsrc_url: str) -> Optional[str]:
     origin = f"{parsed.scheme}://{parsed.netloc}"
     path   = parsed.path.rstrip("/")
 
-    # Prova prima la API Inertia /api/tv/ o /api/movie/
+    # Prova prima la API /api/tv/ o /api/movie/
     api_path = path.replace("/tv/", "/api/tv/", 1).replace("/movie/", "/api/movie/", 1)
     api_url  = f"{origin}{api_path}"
     logger.info(f"🔌 VixSrc API: {api_url}")
@@ -304,91 +144,91 @@ async def _get_vixcloud_embed(vixsrc_url: str) -> Optional[str]:
         "Origin": origin,
     }
 
-    try:
-        resp = await vixsrc_fetch(api_url, headers=api_headers)
-        if resp.status_code == 200:
-            try:
-                data = resp.json()
-                src = data.get("src") or data.get("iframe") or data.get("embed")
-                if src:
-                    embed_url = src if src.startswith("http") else f"{origin}{src}"
-                    logger.info(f"🔗 VixCloud embed (API): {embed_url[:100]}")
-                    return embed_url
-            except Exception as e:
-                logger.debug(f"[vixsrc] API JSON parse error: {e}")
-        else:
-            logger.warning(f"[vixsrc] API status {resp.status_code} per {api_url}")
-    except Exception as e:
-        logger.warning(f"[vixsrc] API request error: {e}")
-
-    # Fallback: pagina Inertia con x-inertia: true
-    logger.info(f"[vixsrc] Fallback Inertia: {vixsrc_url}")
-    inertia_headers = {**_HEADERS, "x-inertia": "true", "Referer": f"{origin}/"}
-
-    try:
-        page_resp = await vixsrc_fetch(vixsrc_url, headers=inertia_headers)
-        page_resp.raise_for_status()
-        ct = page_resp.headers.get("content-type", "")
-
-        if "application/json" in ct:
-            try:
-                idata = page_resp.json()
-                props = idata.get("props", {})
-                src = props.get("src") or props.get("iframe") or props.get("embed")
-                if isinstance(props.get("stream"), dict):
-                    src = src or props["stream"].get("src")
-                if src:
-                    embed_url = src if src.startswith("http") else f"{origin}{src}"
-                    logger.info(f"🔗 VixCloud embed (Inertia JSON): {embed_url[:100]}")
-                    return embed_url
-            except Exception as e:
-                logger.debug(f"[vixsrc] Inertia JSON parse error: {e}")
-        else:
-            html = page_resp.text
-            m = re.search(r'id="app"[^>]+data-page="([^"]+)"', html) or \
-                re.search(r"data-page='([^']+)'", html)
-            if m:
+    async with httpx.AsyncClient(timeout=_TIMEOUT, follow_redirects=True) as client:
+        try:
+            resp = await client.get(api_url, headers=api_headers)
+            if resp.status_code == 200:
                 try:
-                    page_data = json.loads(m.group(1).replace("&quot;", '"'))
-                    props = page_data.get("props", {})
+                    data = resp.json()
+                    src = data.get("src") or data.get("iframe") or data.get("embed")
+                    if src:
+                        embed_url = src if src.startswith("http") else f"{origin}{src}"
+                        logger.info(f"🔗 VixCloud embed (API): {embed_url[:100]}")
+                        return embed_url
+                except Exception as e:
+                    logger.debug(f"[vixsrc] API JSON parse error: {e}")
+            else:
+                logger.warning(f"[vixsrc] API status {resp.status_code} per {api_url}")
+        except Exception as e:
+            logger.warning(f"[vixsrc] API request error: {e}")
+
+        # Fallback: pagina Inertia con x-inertia: true
+        logger.info(f"[vixsrc] Fallback Inertia: {vixsrc_url}")
+        inertia_headers = {**_HEADERS, "x-inertia": "true", "Referer": f"{origin}/"}
+
+        try:
+            page_resp = await client.get(vixsrc_url, headers=inertia_headers)
+            page_resp.raise_for_status()
+            ct = page_resp.headers.get("content-type", "")
+
+            if "application/json" in ct:
+                try:
+                    idata = page_resp.json()
+                    props = idata.get("props", {})
                     src = props.get("src") or props.get("iframe") or props.get("embed")
                     if isinstance(props.get("stream"), dict):
                         src = src or props["stream"].get("src")
                     if src:
                         embed_url = src if src.startswith("http") else f"{origin}{src}"
-                        logger.info(f"🔗 VixCloud embed (data-page): {embed_url[:100]}")
+                        logger.info(f"🔗 VixCloud embed (Inertia JSON): {embed_url[:100]}")
                         return embed_url
                 except Exception as e:
-                    logger.debug(f"[vixsrc] data-page parse error: {e}")
+                    logger.debug(f"[vixsrc] Inertia JSON parse error: {e}")
+            else:
+                html = page_resp.text
+                m = re.search(r'id="app"[^>]+data-page="([^"]+)"', html) or \
+                    re.search(r"data-page='([^']+)'", html)
+                if m:
+                    try:
+                        page_data = json.loads(m.group(1).replace("&quot;", '"'))
+                        props = page_data.get("props", {})
+                        src = props.get("src") or props.get("iframe") or props.get("embed")
+                        if isinstance(props.get("stream"), dict):
+                            src = src or props["stream"].get("src")
+                        if src:
+                            embed_url = src if src.startswith("http") else f"{origin}{src}"
+                            logger.info(f"🔗 VixCloud embed (data-page): {embed_url[:100]}")
+                            return embed_url
+                    except Exception as e:
+                        logger.debug(f"[vixsrc] data-page parse error: {e}")
 
-            mi = _IFRAME_VIXCLOUD_RE.search(html)
-            if mi:
-                embed_url = mi.group(1)
-                if embed_url.startswith("//"):
-                    embed_url = "https:" + embed_url
-                logger.info(f"🔗 VixCloud embed (iframe regex): {embed_url[:100]}")
-                return embed_url
+                mi = _IFRAME_VIXCLOUD_RE.search(html)
+                if mi:
+                    embed_url = mi.group(1)
+                    if embed_url.startswith("//"):
+                        embed_url = "https:" + embed_url
+                    logger.info(f"🔗 VixCloud embed (iframe regex): {embed_url[:100]}")
+                    return embed_url
 
-            if "masterPlaylist" in html:
-                logger.info("🔗 masterPlaylist nella pagina VixSrc diretta")
-                return vixsrc_url
+                if "masterPlaylist" in html:
+                    logger.info("🔗 masterPlaylist nella pagina VixSrc diretta")
+                    return vixsrc_url
 
-    except httpx.HTTPStatusError as e:
-        logger.warning(f"[vixsrc] Fallback HTTP {e.response.status_code}")
-    except Exception as e:
-        logger.warning(f"[vixsrc] Fallback request error: {e}")
+        except httpx.HTTPStatusError as e:
+            logger.warning(f"[vixsrc] Fallback HTTP {e.response.status_code}")
+        except Exception as e:
+            logger.warning(f"[vixsrc] Fallback request error: {e}")
 
     logger.warning(f"⚠️ Nessun embed VixCloud per {vixsrc_url}")
     return None
 
 
 # ---------------------------------------------------------------------------
-# Step 2: estrai M3U8 dall’embed VixCloud
-# (replica esatta della logica di extractor.ts: token pattern + masterPlaylist)
+# Step 2: estrai M3U8 dall'embed VixCloud
 # ---------------------------------------------------------------------------
 
 def _parse_window_vars(script: str) -> Optional[dict]:
-    raw = script.replace("\n", "\t")
+    raw    = script.replace("\n", "\t")
     key_re = re.compile(r"window\.(\w+)\s*=\s*")
     keys   = key_re.findall(raw)
     parts  = re.split(r"window\.\w+\s*=\s*", raw)[1:]
@@ -407,12 +247,13 @@ def _parse_window_vars(script: str) -> Optional[dict]:
 
 
 async def _extract_m3u8_from_embed(embed_url: str, referer: str) -> Optional[str]:
-    p = urlparse(referer)
+    p      = urlparse(referer)
     origin = f"{p.scheme}://{p.netloc}"
-    hdrs = {**_HEADERS, "Referer": referer, "Origin": origin}
+    hdrs   = {**_HEADERS, "Referer": referer, "Origin": origin}
 
-    resp = await vixsrc_fetch(embed_url, headers=hdrs)
-    resp.raise_for_status()
+    async with httpx.AsyncClient(timeout=_TIMEOUT, follow_redirects=True) as client:
+        resp = await client.get(embed_url, headers=hdrs)
+        resp.raise_for_status()
     html = resp.text
 
     # Cerca script con token/expires
@@ -432,8 +273,8 @@ async def _extract_m3u8_from_embed(embed_url: str, referer: str) -> Optional[str
         logger.warning(f"[vixcloud] Nessuno script token/masterPlaylist in {embed_url[:80]}")
         return None
 
-    # --- Pattern 1: token/expires/url (identico a extractor.ts) ---
-    token_m   = re.search(r"['\"]token['\"]\s*:\s*['\"]([\w-]+)['\"]", script_tag)
+    # --- Pattern 1: token/expires/url ---
+    token_m   = re.search(r"['\"]token['\"]\s*:\s*['\"]([\\w-]+)['\"]", script_tag)
     expires_m = re.search(r"['\"]expires['\"]\s*:\s*['\"]?(\d+)['\"]?", script_tag)
     url_m     = re.search(r"url\s*:\s*['\"]([^'\"]+)['\"]", script_tag)
 
@@ -442,21 +283,19 @@ async def _extract_m3u8_from_embed(embed_url: str, referer: str) -> Optional[str
         expires    = expires_m.group(1)
         server_url = url_m.group(1)
 
-        # Assicura .m3u8 sul path
         server_url = _ensure_m3u8(server_url)
         before_q   = server_url.split("?")[0]
         if not before_q.lower().endswith(".m3u8"):
             server_url = before_q.rstrip("/") + ".m3u8"
 
-        had_b = "b=1" in url_m.group(1)
+        had_b  = "b=1" in url_m.group(1)
         params: List[str] = []
         if had_b:
             params.append("b=1")
         params.append(f"token={quote(token, safe='')}")
         params.append(f"expires={quote(expires, safe='')}")
 
-        fhd = bool(re.search(r"['\"]?canPlayFHD['\"]?\s*[=:]\s*true", script_tag))
-        if fhd:
+        if re.search(r"['\"]?canPlayFHD['\"]?\s*[=:]\s*true", script_tag):
             params.append("h=1")
             logger.info("[vixcloud] canPlayFHD=true → h=1")
 
@@ -464,7 +303,7 @@ async def _extract_m3u8_from_embed(embed_url: str, referer: str) -> Optional[str
         logger.info(f"✅ VixCloud M3U8 (token): {final_url[:120]}")
         return final_url
 
-    # --- Pattern 2: window.masterPlaylist (identico a extractor.ts) ---
+    # --- Pattern 2: window.masterPlaylist ---
     parsed = _parse_window_vars(script_tag)
     if parsed:
         master = parsed.get("masterPlaylist")
@@ -525,20 +364,13 @@ async def get_streams(
     stremio_id: str,
     content_type: str,
     addon_base_url: str = "",
-    proxy_mode: bool = False,
 ) -> Dict:
     """
     Parametri:
       stremio_id      es. "tt1234567" oppure "tt1234567:2:3"
       content_type    "movie" | "series"
-      addon_base_url  base URL dell’addon per costruire URL proxy interno
-      proxy_mode      True = attiva round-robin PROXY/PROXY_BACKUP per fetch vixsrc
+      addon_base_url  base URL dell'addon per costruire URL proxy interno
     """
-    global _proxy_mode_active
-    _proxy_mode_active = proxy_mode or bool(os.getenv("PROXY", "").strip())
-    if _proxy_mode_active:
-        logger.info("[VixSrc][ProxyMode] attivo")
-
     result: Dict = {"streams": []}
     try:
         parts      = stremio_id.split(":")
@@ -554,26 +386,20 @@ async def get_streams(
 
         if is_series:
             page_url      = f"{SC_DOMAIN}/tv/{tmdb_id}/{season}/{episode}/"
-            ep_title_task = asyncio.create_task(
-                get_episode_title(tmdb_id, int(tmdb_id), season, episode)  # type: ignore[arg-type]
-                if False else get_episode_title(tmdb_id, season, episode)  # type: ignore[arg-type]
-            )
+            ep_title_task = asyncio.create_task(get_episode_title(tmdb_id, season, episode))
         else:
             page_url      = f"{SC_DOMAIN}/movie/{tmdb_id}/"
             ep_title_task = None
 
         logger.info(f"🎬 VixSrc page: {page_url}")
 
-        # Verifica esistenza URL (checkUrlExists di StreamVix)
         exists = await check_url_exists(page_url)
         if not exists:
             logger.warning(f"⚠️ Contenuto non trovato su VixSrc: {page_url}")
             return result
 
-        # Estrazione M3U8
         vixcloud_m3u8 = await extract_m3u8(page_url)
 
-        # Titolo
         if is_series and ep_title_task:
             content_label = (await ep_title_task) or tmdb_title or ""
         else:
