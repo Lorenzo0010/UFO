@@ -8,7 +8,7 @@ Logica VixSrc (invariata):
   4. Parsa e costruisce URL HLS finale
   5. Aggiunge &h=1 se canPlayFHD === true
 
-Logica VidXgo (nuova):
+Logica VidXgo:
   - Usa l'IMDB ID direttamente se content_id inizia con "tt",
     altrimenti salta VidXgo (TMDB-only IDs non supportati da VidXgo)
   - Film:  GET {VIDXGO_DOMAIN}/{imdb_id}
@@ -318,6 +318,7 @@ async def extract_m3u8(page_url: str) -> Optional[str]:
 
 async def get_streams(stremio_id: str, content_type: str, addon_base_url: str = "") -> Dict:
     result: Dict = {"streams": []}
+    vidxgo_client: Optional[httpx.AsyncClient] = None
     try:
         parts      = stremio_id.split(":")
         content_id = parts[0]
@@ -339,26 +340,28 @@ async def get_streams(stremio_id: str, content_type: str, addon_base_url: str = 
 
         logger.info(f"🎬 VixSrc page: {page_url}")
 
-        vidxgo_task = None
+        vidxgo_coro = None
         if content_id.startswith("tt"):
             imdb_id = content_id
-            # FIX: per le serie passa season/episode nell'URL VidXgo
             if is_series:
                 vidxgo_embed_url = f"{VIDXGO_DEFAULT_DOMAIN}/{imdb_id}/{season}/{episode}"
             else:
                 vidxgo_embed_url = f"{VIDXGO_DEFAULT_DOMAIN}/{imdb_id}"
             logger.info(f"🎯 VidXgo embed: {vidxgo_embed_url}")
-            async with httpx.AsyncClient(timeout=httpx.Timeout(20.0), follow_redirects=True) as vidxgo_client:
-                vidxgo_task = asyncio.create_task(
-                    fetch_vidxgo(vidxgo_embed_url, vidxgo_client)
-                )
+            # IMPORTANTE: il client NON deve essere chiuso prima del gather.
+            # Creiamo il client senza 'async with' e lo chiudiamo manualmente nel finally.
+            vidxgo_client = httpx.AsyncClient(
+                timeout=httpx.Timeout(25.0),
+                follow_redirects=True,
+            )
+            vidxgo_coro = fetch_vidxgo(vidxgo_embed_url, vidxgo_client)
         else:
             logger.info(f"[VidXgo] content_id '{content_id}' non è un IMDB ID, VidXgo saltato")
 
-        if vidxgo_task:
+        if vidxgo_coro is not None:
             vixcloud_m3u8, vidxgo_result = await asyncio.gather(
                 extract_m3u8(page_url),
-                vidxgo_task,
+                vidxgo_coro,
                 return_exceptions=True,
             )
         else:
@@ -395,9 +398,12 @@ async def get_streams(stremio_id: str, content_type: str, addon_base_url: str = 
                 "url": vidxgo_stream_url,
                 "behaviorHints": {"notWebReady": True, "bingeGroup": "ufo-vidxgo"},
             })
-        elif vidxgo_task is not None:
+        elif vidxgo_coro is not None:
             logger.warning(f"[VidXgo] estrazione fallita per {content_id}")
 
     except Exception as e:
         logger.error(f"❌ get_streams error: {e}")
+    finally:
+        if vidxgo_client is not None:
+            await vidxgo_client.aclose()
     return result
