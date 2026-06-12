@@ -1,16 +1,17 @@
 import asyncio
 import logging
-import re
 from typing import Dict, Optional
 from urllib.parse import quote
 
+from playwright.async_api import async_playwright
+
 from .config import SC_DOMAIN, EASYPROXY_URL, EASYPROXY_PSW, USER_AGENT
-from .tmdb import get_tmdb_info, get_episode_title, get_session
+from .tmdb import get_tmdb_info, get_episode_title
 
 logger = logging.getLogger(__name__)
 
-# Regex per trovare un URL M3U8 nel sorgente HTML o nelle risposte JSON di VixSrc
-_M3U8_RE = re.compile(r'https?://[^\s\'"<>]+\.m3u8[^\s\'"<>]*')
+# Timeout (secondi) per attendere che VixSrc lanci la richiesta M3U8
+_INTERCEPT_TIMEOUT = 15
 
 
 def build_easyproxy_url(m3u8_url: str) -> str:
@@ -27,63 +28,50 @@ def build_easyproxy_url(m3u8_url: str) -> str:
 
 async def extract_m3u8(page_url: str) -> Optional[str]:
     """
-    Tenta di estrarre il vero URL M3U8 da una pagina VixSrc.
-
-    Strategia (in ordine):
-    1. Chiama l'endpoint /api/source/ di VixSrc (risposta JSON con file[])
-    2. Scarica la pagina HTML e cerca un URL .m3u8 nel sorgente
+    Apre la pagina VixSrc con Playwright (Chromium headless) e intercetta
+    la prima richiesta di rete verso un file .m3u8 master/index.
+    Ritorna l'URL M3U8 reale oppure None se il timeout scade.
     """
-    client = get_session()
-    headers = {
-        "User-Agent": USER_AGENT,
-        "Referer": page_url,
-        "Origin": SC_DOMAIN,
-    }
+    found: list[str] = []
 
-    # ── Strategia 1: endpoint /api/source/ ──────────────────────────────────
-    # VixSrc espone tipicamente un endpoint che restituisce i file sorgente
-    # Es: https://vixsrc.to/api/source/278  oppure  /api/source/tv/2691/6/5
-    try:
-        # Ricava il path relativo dalla page_url per costruire l'endpoint API
-        path = page_url.replace(SC_DOMAIN, "").strip("/")  # es. "movie/278" o "tv/2691/6/5"
-        api_url = f"{SC_DOMAIN}/api/source/{path}"
-        r = await asyncio.wait_for(
-            client.post(api_url, headers=headers, data={"r": SC_DOMAIN, "d": SC_DOMAIN.split("//")[1]}),
-            timeout=8.0,
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(
+            headless=True,
+            args=[
+                "--no-sandbox",
+                "--disable-setuid-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-gpu",
+            ],
         )
-        if r.status_code == 200:
-            try:
-                data = r.json()
-                # Formato atteso: {"success": true, "data": [{"file": "...", "type": "hls"}, ...]}
-                sources = data.get("data") or []
-                for src in sources:
-                    file_url = src.get("file", "")
-                    if ".m3u8" in file_url:
-                        logger.info(f"✅ M3U8 trovato via API: {file_url[:80]}...")
-                        return file_url
-            except Exception:
-                pass
-            # Fallback: cerca .m3u8 nel testo grezzo della risposta
-            match = _M3U8_RE.search(r.text)
-            if match:
-                logger.info(f"✅ M3U8 trovato via API (regex): {match.group()[:80]}...")
-                return match.group()
-    except Exception as e:
-        logger.debug(f"⚠️ API source fallita: {e}")
+        context = await browser.new_context(
+            user_agent=USER_AGENT,
+            java_script_enabled=True,
+        )
+        page = await context.new_page()
 
-    # ── Strategia 2: scraping HTML della pagina ──────────────────────────────
-    try:
-        r = await asyncio.wait_for(
-            client.get(page_url, headers=headers),
-            timeout=10.0,
-        )
-        if r.status_code == 200:
-            match = _M3U8_RE.search(r.text)
-            if match:
-                logger.info(f"✅ M3U8 trovato via HTML: {match.group()[:80]}...")
-                return match.group()
-    except Exception as e:
-        logger.debug(f"⚠️ Scraping HTML fallito: {e}")
+        async def on_request(request):
+            url = request.url
+            if ".m3u8" in url and not found:
+                logger.debug(f"🔍 Intercepted: {url[:100]}")
+                found.append(url)
+
+        page.on("request", on_request)
+
+        try:
+            await page.goto(page_url, wait_until="domcontentloaded", timeout=12_000)
+            # Attende che il player faccia partire la richiesta M3U8
+            deadline = asyncio.get_event_loop().time() + _INTERCEPT_TIMEOUT
+            while not found and asyncio.get_event_loop().time() < deadline:
+                await asyncio.sleep(0.3)
+        except Exception as e:
+            logger.debug(f"⚠️ Playwright goto error: {e}")
+        finally:
+            await browser.close()
+
+    if found:
+        logger.info(f"✅ M3U8 intercettato: {found[0][:80]}...")
+        return found[0]
 
     logger.warning(f"❌ Nessun M3U8 trovato per {page_url}")
     return None
