@@ -3,14 +3,15 @@ import logging
 from typing import Dict, Optional
 from urllib.parse import quote
 
-from playwright.async_api import async_playwright
+from playwright.async_api import async_playwright, TimeoutError as PWTimeout
 
 from .config import SC_DOMAIN, EASYPROXY_URL, EASYPROXY_PSW, USER_AGENT
 from .tmdb import get_tmdb_info, get_episode_title
 
 logger = logging.getLogger(__name__)
 
-_INTERCEPT_TIMEOUT = 20
+# Secondi totali di attesa dopo il click per intercettare il .m3u8
+_POST_CLICK_TIMEOUT = 15
 
 
 def build_easyproxy_url(m3u8_url: str) -> str:
@@ -22,6 +23,10 @@ def build_easyproxy_url(m3u8_url: str) -> str:
 
 
 async def extract_m3u8(page_url: str) -> Optional[str]:
+    """
+    Apre VixSrc con Playwright, aspetta l'idratazione della SPA React,
+    clicca il pulsante play e intercetta la prima richiesta .m3u8.
+    """
     found: list[str] = []
 
     async with async_playwright() as p:
@@ -42,43 +47,61 @@ async def extract_m3u8(page_url: str) -> Optional[str]:
 
         async def on_request(request):
             url = request.url
-            # Log ogni richiesta per diagnostica
-            logger.debug(f"[REQ] {request.method} {url[:120]}")
             if ".m3u8" in url and not found:
                 logger.info(f"🔍 M3U8 intercettato: {url[:120]}")
                 found.append(url)
 
-        async def on_response(response):
-            url = response.url
-            status = response.status
-            # Log solo risposte non-OK o tipi media interessanti
-            ct = response.headers.get("content-type", "")
-            if status >= 300 or "video" in ct or "mpegurl" in ct or ".m3u8" in url:
-                logger.info(f"[RES] {status} {url[:120]} | {ct}")
-
         page.on("request", on_request)
-        page.on("response", on_response)
 
         try:
-            logger.info(f"🌐 Playwright: navigazione verso {page_url}")
-            resp = await page.goto(page_url, wait_until="domcontentloaded", timeout=15_000)
-            logger.info(f"🌐 Playwright: pagina caricata, status={resp.status if resp else 'N/A'}")
+            logger.info(f"🌐 Navigazione: {page_url}")
+            # 1. Carica la pagina e aspetta che la SPA React idrati il DOM
+            await page.goto(page_url, wait_until="networkidle", timeout=20_000)
+            logger.info(f"🌐 SPA caricata. Titolo: '{await page.title()}'")
 
-            # Aspetta che il player JS faccia partire la richiesta M3U8
-            deadline = asyncio.get_event_loop().time() + _INTERCEPT_TIMEOUT
+            # Breve attesa extra per far inizializzare il player JS
+            await asyncio.sleep(2)
+
+            # 2. Prova a cliccare il pulsante play del player
+            # VixSrc usa tipicamente un <button> con aria-label play
+            # o un elemento con classe che contiene 'play'
+            play_selectors = [
+                "button[aria-label*='lay' i]",      # Play / play
+                ".jw-icon-display",                 # JWPlayer
+                ".plyr__control--overlaid",         # Plyr
+                "[class*='play' i]",                # generico
+                "video",                            # click diretto sul video
+            ]
+            clicked = False
+            for sel in play_selectors:
+                try:
+                    el = page.locator(sel).first
+                    if await el.is_visible(timeout=2000):
+                        await el.click(timeout=3000)
+                        logger.info(f"▶️ Click su '{sel}'")
+                        clicked = True
+                        break
+                except PWTimeout:
+                    continue
+                except Exception as e:
+                    logger.debug(f"Selector '{sel}' fallito: {e}")
+
+            if not clicked:
+                logger.warning("⚠️ Nessun pulsante play trovato, continuo ad aspettare...")
+
+            # 3. Attendi M3U8 dopo il click
+            deadline = asyncio.get_event_loop().time() + _POST_CLICK_TIMEOUT
             while not found and asyncio.get_event_loop().time() < deadline:
                 await asyncio.sleep(0.3)
 
-            # Se non trovato, dumpa il titolo della pagina per capire cosa ha caricato
+            # 4. Se ancora nulla, dumpa il DOM per diagnostica
             if not found:
                 title = await page.title()
-                logger.warning(f"⚠️ Timeout senza M3U8. Titolo pagina: '{title}'")
-                # Dumpa i primi 500 char del body per vedere se c'e' un redirect/captcha
                 try:
-                    body_text = await page.evaluate("() => document.body?.innerText?.slice(0, 500)")
-                    logger.warning(f"⚠️ Body snippet: {body_text!r}")
+                    snippet = await page.evaluate("() => document.body?.innerHTML?.slice(0, 800)")
+                    logger.warning(f"⚠️ Timeout. Titolo='{title}' | HTML snippet: {snippet!r}")
                 except Exception:
-                    pass
+                    logger.warning(f"⚠️ Timeout. Titolo='{title}'")
 
         except Exception as e:
             logger.error(f"❌ Playwright errore: {e}")
