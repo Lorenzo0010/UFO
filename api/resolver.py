@@ -1,15 +1,22 @@
 """
-resolver.py — estrazione M3U8 da VixSrc/VixCloud via fetch HTTP puro.
+resolver.py — estrazione M3U8 da VixSrc/VixCloud + VidXgo via fetch HTTP puro.
 
-Logica portata da streamvix/src/extractor.ts (getDirectStream):
+Logica VixSrc (invariata):
   1. GET /api/tv/<tmdb>/<s>/<e> oppure /api/movie/<tmdb>  → JSON con campo "src"
   2. GET sull'URL embed restituito da "src" (con header Referer = pagina VixSrc)
   3. Trova lo script inline con token/expires/masterPlaylist
   4. Parsa e costruisce URL HLS finale
   5. Aggiunge &h=1 se canPlayFHD === true
 
+Logica VidXgo (nuova):
+  - Cerca l'IMDB ID tramite TMDB API
+  - GET {VIDXGO_DOMAIN}/{imdb_id} con UA Firefox-150
+  - Decripta il 6° script tag (XOR con chiave ciclica)
+  - Estrae l'URL HLS dal JS decriptato
+  - I segmenti richiedono header specifici → passati al proxy via ?headers=
+
+Le due estrazioni vengono lanciate in parallelo con asyncio.gather.
 Nessun Playwright, nessun browser headless. Puro httpx async.
-Il proxy HLS è ora interno a UFO (api/proxy.py).
 """
 
 import asyncio
@@ -22,7 +29,9 @@ from urllib.parse import quote, urlparse
 import httpx
 
 from .config import SC_DOMAIN, USER_AGENT
-from .tmdb import get_tmdb_info, get_episode_title
+from .proxy import encode_headers_b64
+from .tmdb import get_tmdb_info, get_episode_title, get_imdb_id
+from .vidxgo import fetch_vidxgo, VIDXGO_DEFAULT_DOMAIN
 
 logger = logging.getLogger(__name__)
 
@@ -43,14 +52,19 @@ _TIMEOUT = httpx.Timeout(20.0)
 # Costruisce URL proxy interno
 # ---------------------------------------------------------------------------
 
-def build_proxy_url(m3u8_url: str, addon_base_url: str) -> str:
+def build_proxy_url(m3u8_url: str, addon_base_url: str, extra_headers: dict | None = None) -> str:
     """
     Restituisce l'URL del proxy HLS interno:
-      http://<host>:<port>/proxy/manifest.m3u8?url=<encoded_m3u8>
+      http://<host>/proxy/manifest.m3u8?url=<encoded_m3u8>[&headers=<b64>]
+    Il parametro headers (opzionale) serve per provider come VidXgo che
+    richiedono Origin/Referer/UA specifici sui segmenti CDN.
     """
     base = addon_base_url.rstrip("/")
     encoded = quote(m3u8_url, safe="")
-    return f"{base}/proxy/manifest.m3u8?url={encoded}"
+    url = f"{base}/proxy/manifest.m3u8?url={encoded}"
+    if extra_headers:
+        url += f"&headers={quote(encode_headers_b64(extra_headers), safe='')}"
+    return url
 
 
 # ---------------------------------------------------------------------------
@@ -70,7 +84,6 @@ async def _get_vixcloud_embed(vixsrc_url: str, client: httpx.AsyncClient) -> Opt
     origin = f"{parsed.scheme}://{parsed.netloc}"
     path = parsed.path.rstrip("/")
 
-    # Costruisci URL API: /tv/615/6/1 → /api/tv/615/6/1
     api_path = path.replace("/tv/", "/api/tv/", 1).replace("/movie/", "/api/movie/", 1)
     api_url = f"{origin}{api_path}"
 
@@ -102,7 +115,6 @@ async def _get_vixcloud_embed(vixsrc_url: str, client: httpx.AsyncClient) -> Opt
     except httpx.RequestError as e:
         logger.warning(f"[vixsrc] API request error: {e}")
 
-    # Fallback: fetch pagina con x-inertia header, cerca iframe nel JSON data-page
     logger.info(f"[vixsrc] Fallback: fetch pagina Inertia {vixsrc_url}")
     inertia_headers = {
         **_HEADERS,
@@ -251,7 +263,6 @@ async def _extract_m3u8_from_embed(embed_url: str, referer: str, client: httpx.A
         logger.info(f"✅ VixCloud M3U8 (token pattern): {final_url[:120]}")
         return final_url
 
-    # Fallback masterPlaylist
     parsed = _sanitise_and_parse_window_vars(script_tag)
     if parsed:
         master = parsed.get("masterPlaylist")
@@ -284,7 +295,7 @@ async def _extract_m3u8_from_embed(embed_url: str, referer: str, client: httpx.A
 
 
 # ---------------------------------------------------------------------------
-# Funzione principale: VixSrc URL -> M3U8
+# Funzione principale VixCloud: VixSrc URL -> M3U8
 # ---------------------------------------------------------------------------
 
 async def extract_m3u8(page_url: str) -> Optional[str]:
@@ -316,47 +327,88 @@ async def get_streams(stremio_id: str, content_type: str, addon_base_url: str = 
         episode    = parts[2] if len(parts) > 2 else None
         is_series  = content_type == "series" and season and episode
 
-        if is_series:
-            tmdb_id, tmdb_title = await get_tmdb_info(content_id, content_type)
-            if not tmdb_id:
-                logger.warning(f"⚠️ TMDB ID non trovato per {content_id}")
-                return result
-
-            page_url = f"{SC_DOMAIN}/tv/{tmdb_id}/{season}/{episode}/"
-            logger.info(f"🎬 VixSrc page: {page_url}")
-
-            ep_title_task = asyncio.create_task(get_episode_title(tmdb_id, season, episode))
-            real_m3u8 = await extract_m3u8(page_url)
-            ep_title  = await ep_title_task
-            content_label = ep_title or tmdb_title or ""
-        else:
-            tmdb_id, tmdb_title = await get_tmdb_info(content_id, content_type)
-            if not tmdb_id:
-                logger.warning(f"⚠️ TMDB ID non trovato per {content_id}")
-                return result
-
-            page_url = f"{SC_DOMAIN}/movie/{tmdb_id}/"
-            logger.info(f"🎬 VixSrc page: {page_url}")
-
-            real_m3u8     = await extract_m3u8(page_url)
-            content_label = tmdb_title or "Film"
-
-        if not real_m3u8:
-            logger.error(f"❌ Impossibile estrarre M3U8 per {page_url}")
+        # Risolvi TMDB ID (necessario per VixSrc)
+        tmdb_id, tmdb_title = await get_tmdb_info(content_id, content_type)
+        if not tmdb_id:
+            logger.warning(f"⚠️ TMDB ID non trovato per {content_id}")
             return result
 
-        stream_url = build_proxy_url(real_m3u8, addon_base_url)
-        logger.info(f"✅ Proxy interno stream: {stream_url[:80]}...")
+        # Costruisci URL VixSrc
+        if is_series:
+            page_url = f"{SC_DOMAIN}/tv/{tmdb_id}/{season}/{episode}/"
+            ep_title_task = asyncio.create_task(get_episode_title(tmdb_id, season, episode))
+        else:
+            page_url = f"{SC_DOMAIN}/movie/{tmdb_id}/"
+            ep_title_task = None
 
-        result["streams"].append({
-            "name": "UFO\n🇮🇹",
-            "title": content_label,
-            "url": stream_url,
-            "behaviorHints": {
-                "notWebReady": True,
-                "bingeGroup": "ufo-sc",
-            },
-        })
+        logger.info(f"🎬 VixSrc page: {page_url}")
+
+        # Costruisci URL VidXgo (usa IMDB ID se disponibile, altrimenti salta)
+        vidxgo_task = None
+        imdb_id = await get_imdb_id(content_id, content_type)
+        if imdb_id:
+            vidxgo_embed_url = f"{VIDXGO_DEFAULT_DOMAIN}/{imdb_id}"
+            logger.info(f"🎯 VidXgo embed: {vidxgo_embed_url}")
+            async with httpx.AsyncClient(timeout=httpx.Timeout(20.0), follow_redirects=True) as vidxgo_client:
+                vidxgo_task = asyncio.create_task(
+                    fetch_vidxgo(vidxgo_embed_url, vidxgo_client)
+                )
+        else:
+            logger.info(f"[VidXgo] IMDB ID non disponibile per {content_id}, skip")
+
+        # Lancia VixCloud ed eventuale VidXgo in parallelo
+        if vidxgo_task:
+            vixcloud_m3u8, vidxgo_result = await asyncio.gather(
+                extract_m3u8(page_url),
+                vidxgo_task,
+                return_exceptions=True,
+            )
+        else:
+            vixcloud_m3u8 = await extract_m3u8(page_url)
+            vidxgo_result = None
+
+        # Risolvi titolo episodio se serie
+        if is_series and ep_title_task:
+            content_label = (await ep_title_task) or tmdb_title or ""
+        else:
+            content_label = tmdb_title or "Film"
+
+        # --- Stream VixCloud ---
+        if isinstance(vixcloud_m3u8, str) and vixcloud_m3u8:
+            stream_url = build_proxy_url(vixcloud_m3u8, addon_base_url)
+            logger.info(f"✅ VixCloud stream: {stream_url[:80]}...")
+            result["streams"].append({
+                "name": "UFO\n🇮🇹 VixCloud",
+                "title": content_label,
+                "url": stream_url,
+                "behaviorHints": {
+                    "notWebReady": True,
+                    "bingeGroup": "ufo-vixcloud",
+                },
+            })
+        else:
+            logger.error(f"❌ VixCloud: impossibile estrarre M3U8 per {page_url}")
+
+        # --- Stream VidXgo ---
+        if isinstance(vidxgo_result, dict) and vidxgo_result:
+            vidxgo_stream_url = build_proxy_url(
+                vidxgo_result["m3u8"],
+                addon_base_url,
+                extra_headers=vidxgo_result["playback_headers"],
+            )
+            logger.info(f"✅ VidXgo stream: {vidxgo_stream_url[:80]}...")
+            result["streams"].append({
+                "name": "UFO\n🎯 VidXgo",
+                "title": content_label,
+                "url": vidxgo_stream_url,
+                "behaviorHints": {
+                    "notWebReady": True,
+                    "bingeGroup": "ufo-vidxgo",
+                },
+            })
+        elif vidxgo_task is not None:
+            logger.warning(f"[VidXgo] estrazione fallita per {content_id}")
+
     except Exception as e:
         logger.error(f"❌ get_streams error: {e}")
     return result

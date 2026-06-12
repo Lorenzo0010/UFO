@@ -6,8 +6,13 @@ Fix applicati:
   2. _rewrite_manifest riscrive URI in #EXT-X-KEY, #EXT-X-MAP, ecc.
   3. /proxy/segment rileva sub-playlist M3U8 (anche senza .m3u8 nell'URL)
      e le riscrive prima di restituirle → enc.key proxiato correttamente
+  4. Supporto header dinamici via ?headers=<base64-JSON>:
+     usato da VidXgo (e altri provider futuri) per passare Origin/Referer/UA
+     specifici ai segmenti CDN che richiedono header particolari.
 """
 
+import base64
+import json
 import logging
 import re
 from urllib.parse import quote, urljoin, urlparse
@@ -22,7 +27,7 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/proxy", tags=["proxy"])
 
-_PROXY_HEADERS = {
+_PROXY_HEADERS_VIXCLOUD = {
     "User-Agent": USER_AGENT or "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:131.0) Gecko/20100101 Firefox/131.0",
     "Referer": "https://vixsrc.to/",
     "Origin": "https://vixsrc.to",
@@ -56,21 +61,45 @@ async def close_proxy_client() -> None:
         _client = None
 
 
+def _decode_headers_param(headers_b64: str | None) -> dict:
+    """
+    Decodifica il parametro ?headers=<base64-JSON> opzionale.
+    Restituisce un dict vuoto se assente o malformato.
+    """
+    if not headers_b64:
+        return {}
+    try:
+        decoded = base64.b64decode(headers_b64 + "==" ).decode("utf-8")
+        return json.loads(decoded)
+    except Exception:
+        return {}
+
+
+def _build_headers(custom: dict) -> dict:
+    """
+    Unisce gli header di default VixCloud con quelli custom.
+    Gli header custom hanno la precedenza (permettono override di UA, Referer, Origin).
+    """
+    merged = {**_PROXY_HEADERS_VIXCLOUD}
+    merged.update(custom)
+    return merged
+
+
 def _is_m3u8_content(content_type: str, body: str) -> bool:
     """Rileva se la risposta è un manifest M3U8 anche quando l'URL non ha .m3u8."""
     ct = content_type.split(";")[0].strip().lower()
     if ct in _M3U8_CONTENT_TYPES:
         return True
-    # Fallback: controlla il contenuto (VixSrc serve sub-playlist come text/plain)
     return body.lstrip().startswith("#EXTM3U")
 
 
-def _rewrite_manifest(content: str, original_url: str, proxy_base: str) -> str:
+def _rewrite_manifest(content: str, original_url: str, proxy_base: str, headers_b64: str | None = None) -> str:
     """
     Riscrive un manifest M3U8 sostituendo tutti gli URL con URL proxy.
+    Propaga il parametro headers_b64 agli URL riscritti se presente.
     Gestisce:
     - Righe URL (segmenti, variant playlist)
-    - URI="..." in qualsiasi direttiva (#EXT-X-KEY, #EXT-X-MAP, #EXT-X-MEDIA, ecc.)
+    - URI=\"...\" in qualsiasi direttiva (#EXT-X-KEY, #EXT-X-MAP, #EXT-X-MEDIA, ecc.)
     """
     lines = content.splitlines(keepends=True)
     rewritten = []
@@ -78,9 +107,10 @@ def _rewrite_manifest(content: str, original_url: str, proxy_base: str) -> str:
     def proxify_uri(raw: str) -> str:
         abs_url = _make_absolute(raw, original_url)
         parsed = urlparse(abs_url)
+        h_param = f"&headers={quote(headers_b64, safe='')}" if headers_b64 else ""
         if parsed.path.endswith(".m3u8") or ".m3u8?" in parsed.path:
-            return f"{proxy_base}/manifest.m3u8?url={quote(abs_url, safe='')}"
-        return f"{proxy_base}/segment?url={quote(abs_url, safe='')}"
+            return f"{proxy_base}/manifest.m3u8?url={quote(abs_url, safe='')}{h_param}"
+        return f"{proxy_base}/segment?url={quote(abs_url, safe='')}{h_param}"
 
     for line in lines:
         stripped = line.strip()
@@ -99,7 +129,6 @@ def _rewrite_manifest(content: str, original_url: str, proxy_base: str) -> str:
             rewritten.append(line)
             continue
 
-        # Riga URL (segmento o variant playlist)
         rewritten.append(proxify_uri(stripped) + "\n")
 
     return "".join(rewritten)
@@ -116,9 +145,14 @@ def _proxy_base(request: Request) -> str:
     return f"{base}/proxy"
 
 
+def encode_headers_b64(headers: dict) -> str:
+    """Serializza un dict di header in base64-JSON per il param ?headers=."""
+    return base64.b64encode(json.dumps(headers).encode()).decode().rstrip("=")
+
+
 # ── HEAD manifest ─────────────────────────────────────────────────────────────
 @router.head("/manifest.m3u8")
-async def proxy_manifest_head(url: str, request: Request):
+async def proxy_manifest_head(url: str, request: Request, headers: str | None = None):
     """Risponde alle richieste HEAD di Stremio senza fetchare il manifest."""
     if not url:
         raise HTTPException(status_code=400, detail="Parametro 'url' mancante")
@@ -131,21 +165,23 @@ async def proxy_manifest_head(url: str, request: Request):
 
 # ── GET manifest ──────────────────────────────────────────────────────────────
 @router.get("/manifest.m3u8")
-async def proxy_manifest(url: str, request: Request):
+async def proxy_manifest(url: str, request: Request, headers: str | None = None):
     """Fetcha e riscrive un manifest M3U8 (master o media playlist)."""
     if not url:
         raise HTTPException(status_code=400, detail="Parametro 'url' mancante")
 
     logger.debug(f"[proxy] manifest: {url[:100]}")
     client = get_client()
+    custom_headers = _decode_headers_param(headers)
+    effective_headers = _build_headers(custom_headers)
 
     try:
-        resp = await client.get(url, headers=_PROXY_HEADERS)
+        resp = await client.get(url, headers=effective_headers)
         if resp.status_code != 200:
             logger.warning(f"[proxy] manifest HTTP {resp.status_code} per {url[:80]}")
             raise HTTPException(status_code=resp.status_code, detail="Upstream error")
 
-        rewritten = _rewrite_manifest(resp.text, url, _proxy_base(request))
+        rewritten = _rewrite_manifest(resp.text, url, _proxy_base(request), headers)
 
         return Response(
             content=rewritten,
@@ -159,20 +195,23 @@ async def proxy_manifest(url: str, request: Request):
 
 # ── GET segmento ──────────────────────────────────────────────────────────────
 @router.get("/segment")
-async def proxy_segment(url: str, request: Request):
+async def proxy_segment(url: str, request: Request, headers: str | None = None):
     """
     Proxia segmenti media (.ts, .aac, chiave AES, ecc.).
     Se la risposta upstream è un M3U8 (sub-playlist senza estensione .m3u8),
-    la riscrive prima di restituirla — così l'enc.key viene proxiato.
+    la riscrive prima di restituirla → enc.key viene proxiato.
+    Supporta header personalizzati via ?headers=<base64-JSON>.
     """
     if not url:
         raise HTTPException(status_code=400, detail="Parametro 'url' mancante")
 
     logger.debug(f"[proxy] segment: {url[:100]}")
     client = get_client()
+    custom_headers = _decode_headers_param(headers)
+    effective_headers = _build_headers(custom_headers)
 
     try:
-        resp = await client.get(url, headers=_PROXY_HEADERS)
+        resp = await client.get(url, headers=effective_headers)
 
         if resp.status_code not in (200, 206):
             logger.warning(f"[proxy] segment HTTP {resp.status_code} per {url[:80]}")
@@ -181,17 +220,15 @@ async def proxy_segment(url: str, request: Request):
         content_type = resp.headers.get("content-type", "video/MP2T")
         body = resp.text
 
-        # Sub-playlist M3U8 senza .m3u8 nell'URL (es. /playlist/123?type=video&rendition=480p)
         if _is_m3u8_content(content_type, body):
             logger.debug(f"[proxy] sub-playlist rilevata, riscrittura: {url[:80]}")
-            rewritten = _rewrite_manifest(body, url, _proxy_base(request))
+            rewritten = _rewrite_manifest(body, url, _proxy_base(request), headers)
             return Response(
                 content=rewritten,
                 media_type="application/vnd.apple.mpegurl",
                 headers={"Access-Control-Allow-Origin": "*", "Cache-Control": "no-cache"},
             )
 
-        # Segmento binario normale → streaming
         async def stream_chunks():
             yield resp.content
 
