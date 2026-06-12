@@ -6,7 +6,8 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from .config import ADDON_NAME, ADDON_LOGO, EASYPROXY_URL, validate_config
+from .config import ADDON_NAME, ADDON_LOGO, validate_config
+from .proxy import router as proxy_router, close_proxy_client
 from .resolver import get_streams
 from .tmdb import close_session
 
@@ -19,7 +20,8 @@ async def lifespan(app: FastAPI):
     validate_config()
     yield
     await close_session()
-    logger.info("🔌 Sessione HTTP chiusa")
+    await close_proxy_client()
+    logger.info("🔌 Sessioni HTTP chiuse")
 
 
 app = FastAPI(title=f"{ADDON_NAME} Addon", lifespan=lifespan)
@@ -30,6 +32,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Registra il proxy HLS interno
+app.include_router(proxy_router)
 
 
 def respond_with(data: Any) -> JSONResponse:
@@ -44,7 +49,7 @@ async def root(request: Request):
     return respond_with({
         "status": "online",
         "addon": ADDON_NAME,
-        "easyproxy": bool(EASYPROXY_URL),
+        "proxy": "internal",
         "manifest": f"{base}/manifest.json",
     })
 
@@ -53,9 +58,9 @@ async def root(request: Request):
 async def manifest():
     return respond_with({
         "id": "org.stremio.mammamia.ufo",
-        "version": "1.5.0",
+        "version": "1.6.0",
         "name": ADDON_NAME,
-        "description": "VixSrc via EasyProxy",
+        "description": "VixSrc con proxy HLS interno",
         "logo": ADDON_LOGO,
         "resources": ["stream"],
         "types": ["movie", "series"],
@@ -65,11 +70,12 @@ async def manifest():
 
 
 @app.get("/stream/{type}/{id}.json")
-async def streams_route(type: str, id: str):
+async def streams_route(type: str, id: str, request: Request):
     if type not in ("movie", "series"):
         raise HTTPException(status_code=404)
     try:
-        data = await get_streams(id, type)
+        base = str(request.base_url).rstrip("/")
+        data = await get_streams(id, type, addon_base_url=base)
     except Exception:
         logger.exception(f"❌ Errore non gestito in streams_route per id={id!r} type={type!r}")
         data = {"streams": []}

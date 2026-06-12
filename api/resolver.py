@@ -9,6 +9,7 @@ Logica portata da streamvix/src/extractor.ts (getDirectStream):
   5. Aggiunge &h=1 se canPlayFHD === true
 
 Nessun Playwright, nessun browser headless. Puro httpx async.
+Il proxy HLS è ora interno a UFO (api/proxy.py).
 """
 
 import asyncio
@@ -20,7 +21,7 @@ from urllib.parse import quote, urlparse
 
 import httpx
 
-from .config import SC_DOMAIN, EASYPROXY_URL, EASYPROXY_PSW, USER_AGENT
+from .config import SC_DOMAIN, USER_AGENT
 from .tmdb import get_tmdb_info, get_episode_title
 
 logger = logging.getLogger(__name__)
@@ -37,36 +38,19 @@ _HEADERS = {
 
 _TIMEOUT = httpx.Timeout(20.0)
 
-# Referer e Origin che VixSrc si aspetta sui propri segmenti HLS
-_VIXSRC_REFERER = "https://vixsrc.to/"
-_VIXSRC_ORIGIN  = "https://vixsrc.to"
-
 
 # ---------------------------------------------------------------------------
-# EasyProxy helper
+# Costruisce URL proxy interno
 # ---------------------------------------------------------------------------
 
-def build_easyproxy_url(m3u8_url: str) -> str:
+def build_proxy_url(m3u8_url: str, addon_base_url: str) -> str:
     """
-    Costruisce l'URL EasyProxy aggiungendo:
-      - d=<m3u8_url>          URL del manifest HLS
-      - h_referer=            Referer richiesto da vixsrc.to per validare i token
-      - h_origin=             Origin richiesto da vixsrc.to
-      - api_password=         (se configurata)
+    Restituisce l'URL del proxy HLS interno:
+      http://<host>:<port>/proxy/manifest.m3u8?url=<encoded_m3u8>
     """
+    base = addon_base_url.rstrip("/")
     encoded = quote(m3u8_url, safe="")
-    referer_enc = quote(_VIXSRC_REFERER, safe="")
-    origin_enc  = quote(_VIXSRC_ORIGIN,  safe="")
-
-    url = (
-        f"{EASYPROXY_URL}/proxy/hls/manifest.m3u8"
-        f"?d={encoded}"
-        f"&h_referer={referer_enc}"
-        f"&h_origin={origin_enc}"
-    )
-    if EASYPROXY_PSW:
-        url += f"&api_password={quote(EASYPROXY_PSW, safe='')}"
-    return url
+    return f"{base}/proxy/manifest.m3u8?url={encoded}"
 
 
 # ---------------------------------------------------------------------------
@@ -323,7 +307,7 @@ async def extract_m3u8(page_url: str) -> Optional[str]:
 # Entry point Stremio
 # ---------------------------------------------------------------------------
 
-async def get_streams(stremio_id: str, content_type: str) -> Dict:
+async def get_streams(stremio_id: str, content_type: str, addon_base_url: str = "") -> Dict:
     result: Dict = {"streams": []}
     try:
         parts      = stremio_id.split(":")
@@ -341,10 +325,6 @@ async def get_streams(stremio_id: str, content_type: str) -> Dict:
             page_url = f"{SC_DOMAIN}/tv/{tmdb_id}/{season}/{episode}/"
             logger.info(f"🎬 VixSrc page: {page_url}")
 
-            if not EASYPROXY_URL:
-                logger.error("❌ EASYPROXY_URL non configurato")
-                return result
-
             ep_title_task = asyncio.create_task(get_episode_title(tmdb_id, season, episode))
             real_m3u8 = await extract_m3u8(page_url)
             ep_title  = await ep_title_task
@@ -358,10 +338,6 @@ async def get_streams(stremio_id: str, content_type: str) -> Dict:
             page_url = f"{SC_DOMAIN}/movie/{tmdb_id}/"
             logger.info(f"🎬 VixSrc page: {page_url}")
 
-            if not EASYPROXY_URL:
-                logger.error("❌ EASYPROXY_URL non configurato")
-                return result
-
             real_m3u8     = await extract_m3u8(page_url)
             content_label = tmdb_title or "Film"
 
@@ -369,8 +345,8 @@ async def get_streams(stremio_id: str, content_type: str) -> Dict:
             logger.error(f"❌ Impossibile estrarre M3U8 per {page_url}")
             return result
 
-        stream_url = build_easyproxy_url(real_m3u8)
-        logger.info(f"✅ EasyProxy stream: {stream_url[:80]}...")
+        stream_url = build_proxy_url(real_m3u8, addon_base_url)
+        logger.info(f"✅ Proxy interno stream: {stream_url[:80]}...")
 
         result["streams"].append({
             "name": "UFO\n🇮🇹",
