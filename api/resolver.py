@@ -1,18 +1,46 @@
-import asyncio
-import logging
-from typing import Dict, Optional
-from urllib.parse import quote
+"""
+resolver.py — estrazione M3U8 da VixSrc/VixCloud via fetch HTTP puro.
 
-from playwright.async_api import async_playwright, TimeoutError as PWTimeout
+Logica portata da streamvix/src/extractors/vixcloud.ts:
+  1. GET sulla pagina VixSrc (/tv/ o /movie/)
+  2. Cerca un tag <iframe> con src che punta a vixcloud.*
+  3. GET sull'URL embed VixCloud
+  4. Trova lo script inline con `window.masterPlaylist`
+  5. Parsa masterPlaylist.url + params.token + params.expires -> URL HLS finale
+  6. Aggiunge &h=1 se canPlayFHD === true
+
+Nessun Playwright, nessun browser headless. Puro httpx async.
+"""
+
+import asyncio
+import json
+import logging
+import re
+from typing import Dict, Optional
+from urllib.parse import quote, urlencode, urlparse
+
+import httpx
 
 from .config import SC_DOMAIN, EASYPROXY_URL, EASYPROXY_PSW, USER_AGENT
 from .tmdb import get_tmdb_info, get_episode_title
 
 logger = logging.getLogger(__name__)
 
-# Secondi totali di attesa dopo il click per intercettare il .m3u8
-_POST_CLICK_TIMEOUT = 15
+_HEADERS = {
+    "Accept": "*/*",
+    "Connection": "keep-alive",
+    "Cache-Control": "no-cache",
+    "User-Agent": USER_AGENT or (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:131.0) Gecko/20100101 Firefox/131.0"
+    ),
+}
 
+_TIMEOUT = httpx.Timeout(20.0)
+
+
+# ---------------------------------------------------------------------------
+# EasyProxy helper
+# ---------------------------------------------------------------------------
 
 def build_easyproxy_url(m3u8_url: str) -> str:
     encoded = quote(m3u8_url, safe="")
@@ -22,98 +50,168 @@ def build_easyproxy_url(m3u8_url: str) -> str:
     return url
 
 
-async def extract_m3u8(page_url: str) -> Optional[str]:
+# ---------------------------------------------------------------------------
+# Step 1 — ricava l'URL embed VixCloud dalla pagina VixSrc
+# ---------------------------------------------------------------------------
+
+async def _get_vixcloud_embed(vixsrc_url: str, client: httpx.AsyncClient) -> Optional[str]:
     """
-    Apre VixSrc con Playwright, aspetta l'idratazione della SPA React,
-    clicca il pulsante play e intercetta la prima richiesta .m3u8.
+    Carica la pagina VixSrc e cerca un <iframe src="...vixcloud..."> o
+    direttamente un tag script con masterPlaylist (se la pagina è già l'embed).
     """
-    found: list[str] = []
+    resp = await client.get(vixsrc_url, headers=_HEADERS, follow_redirects=True)
+    resp.raise_for_status()
+    html = resp.text
 
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(
-            headless=True,
-            args=[
-                "--no-sandbox",
-                "--disable-setuid-sandbox",
-                "--disable-dev-shm-usage",
-                "--disable-gpu",
-            ],
-        )
-        context = await browser.new_context(
-            user_agent=USER_AGENT,
-            java_script_enabled=True,
-        )
-        page = await context.new_page()
+    # Cerca iframe che punta a vixcloud
+    m = re.search(r'<iframe[^>]+src=["\']([^"\']*vixcloud[^"\']*)["\']', html, re.IGNORECASE)
+    if m:
+        embed_url = m.group(1)
+        if embed_url.startswith("//"):
+            embed_url = "https:" + embed_url
+        logger.info(f"🔗 VixCloud embed trovato: {embed_url[:100]}")
+        return embed_url
 
-        async def on_request(request):
-            url = request.url
-            if ".m3u8" in url and not found:
-                logger.info(f"🔍 M3U8 intercettato: {url[:120]}")
-                found.append(url)
+    # Fallback: la pagina stessa contiene masterPlaylist (embed diretto)
+    if "masterPlaylist" in html:
+        logger.info("🔗 masterPlaylist trovato direttamente nella pagina VixSrc")
+        return vixsrc_url
 
-        page.on("request", on_request)
-
-        try:
-            logger.info(f"🌐 Navigazione: {page_url}")
-            # 1. Carica la pagina e aspetta che la SPA React idrati il DOM
-            await page.goto(page_url, wait_until="networkidle", timeout=20_000)
-            logger.info(f"🌐 SPA caricata. Titolo: '{await page.title()}'")
-
-            # Breve attesa extra per far inizializzare il player JS
-            await asyncio.sleep(2)
-
-            # 2. Prova a cliccare il pulsante play del player
-            # VixSrc usa tipicamente un <button> con aria-label play
-            # o un elemento con classe che contiene 'play'
-            play_selectors = [
-                "button[aria-label*='lay' i]",      # Play / play
-                ".jw-icon-display",                 # JWPlayer
-                ".plyr__control--overlaid",         # Plyr
-                "[class*='play' i]",                # generico
-                "video",                            # click diretto sul video
-            ]
-            clicked = False
-            for sel in play_selectors:
-                try:
-                    el = page.locator(sel).first
-                    if await el.is_visible(timeout=2000):
-                        await el.click(timeout=3000)
-                        logger.info(f"▶️ Click su '{sel}'")
-                        clicked = True
-                        break
-                except PWTimeout:
-                    continue
-                except Exception as e:
-                    logger.debug(f"Selector '{sel}' fallito: {e}")
-
-            if not clicked:
-                logger.warning("⚠️ Nessun pulsante play trovato, continuo ad aspettare...")
-
-            # 3. Attendi M3U8 dopo il click
-            deadline = asyncio.get_event_loop().time() + _POST_CLICK_TIMEOUT
-            while not found and asyncio.get_event_loop().time() < deadline:
-                await asyncio.sleep(0.3)
-
-            # 4. Se ancora nulla, dumpa il DOM per diagnostica
-            if not found:
-                title = await page.title()
-                try:
-                    snippet = await page.evaluate("() => document.body?.innerHTML?.slice(0, 800)")
-                    logger.warning(f"⚠️ Timeout. Titolo='{title}' | HTML snippet: {snippet!r}")
-                except Exception:
-                    logger.warning(f"⚠️ Timeout. Titolo='{title}'")
-
-        except Exception as e:
-            logger.error(f"❌ Playwright errore: {e}")
-        finally:
-            await browser.close()
-
-    if found:
-        return found[0]
-
-    logger.warning(f"❌ Nessun M3U8 trovato per {page_url}")
+    logger.warning(f"⚠️ Nessun iframe VixCloud trovato in {vixsrc_url}")
     return None
 
+
+# ---------------------------------------------------------------------------
+# Step 2 — estrai M3U8 dall'embed VixCloud (porta di vixcloud.ts)
+# ---------------------------------------------------------------------------
+
+def _sanitise_and_parse_window_vars(script: str) -> Optional[dict]:
+    """
+    Replica getSanitisedScript() di vixcloud.ts:
+    split su ogni `window.VAR = ` e ricostruisce un JSON aggregato.
+    """
+    raw = script.replace("\n", "\t")
+
+    key_re = re.compile(r"window\.(\w+)\s*=\s*")
+    keys = key_re.findall(raw)
+    parts = key_re.split(raw)[1:]  # drop il testo prima del primo `window.`
+
+    # key_re.split restituisce: [testo_pre, key1, parte1, key2, parte2, ...]
+    # Usiamo findall per i nomi e splittiamo sul pattern per i valori
+    value_parts = re.split(r"window\.\w+\s*=\s*", raw)[1:]
+
+    if not keys or len(keys) != len(value_parts):
+        logger.debug(f"[vixcloud] key/parts mismatch keys={len(keys)} parts={len(value_parts)}")
+        return None
+
+    json_objects = []
+    for key, part in zip(keys, value_parts):
+        cleaned = part
+        cleaned = re.sub(r";", "", cleaned)
+        cleaned = re.sub(r'([{\[,])\s*(\w+)\s*:', r'\1 "\2":', cleaned)
+        cleaned = re.sub(r",(\s*[}\]])", r"\1", cleaned)
+        cleaned = cleaned.strip()
+        cleaned = cleaned.replace("'", '"')
+        json_objects.append(f'"{key}": {cleaned}')
+
+    aggregated = "{\n" + ",\n".join(json_objects) + "\n}"
+
+    try:
+        return json.loads(aggregated)
+    except json.JSONDecodeError as e:
+        logger.debug(f"[vixcloud] JSON parse fail: {e} | snippet: {aggregated[:200]}")
+        return None
+
+
+async def _extract_m3u8_from_embed(embed_url: str, client: httpx.AsyncClient) -> Optional[str]:
+    """
+    Porta diretta di VixCloudHlsExtractor.extract() da vixcloud.ts.
+    """
+    resp = await client.get(embed_url, headers=_HEADERS, follow_redirects=True)
+    resp.raise_for_status()
+    html = resp.text
+
+    # Trova il <script> che contiene masterPlaylist
+    script_tag = None
+    for m in re.finditer(r"<script[^>]*>([\s\S]*?)</script>", html, re.IGNORECASE):
+        if "masterPlaylist" in m.group(1):
+            script_tag = m.group(1)
+            break
+
+    if not script_tag:
+        logger.warning(f"[vixcloud] Nessuno script con masterPlaylist in {embed_url[:80]}")
+        return None
+
+    parsed = _sanitise_and_parse_window_vars(script_tag)
+    if not parsed:
+        # Fallback: regex diretta sull'URL m3u8 se la parse strutturata fallisce
+        m = re.search(r'"url"\s*:\s*"([^"]+\.m3u8[^"]*)"', script_tag)
+        if m:
+            logger.info(f"[vixcloud] Fallback regex URL: {m.group(1)[:80]}")
+            return m.group(1)
+        return None
+
+    master = parsed.get("masterPlaylist")
+    if not master:
+        logger.warning("[vixcloud] masterPlaylist mancante nel JSON parsato")
+        return None
+
+    base_url: str = master.get("url", "")
+    if not base_url:
+        logger.warning("[vixcloud] masterPlaylist.url vuoto")
+        return None
+
+    params_obj = master.get("params", {}) or {}
+    token = params_obj.get("token", "")
+    expires = params_obj.get("expires", "")
+
+    param_str = f"token={quote(str(token), safe='')}&expires={quote(str(expires), safe='')}"
+
+    # Assicura suffisso .m3u8
+    before_query = base_url.split("?")[0]
+    if not re.search(r"\.m3u8$", before_query, re.IGNORECASE):
+        query_part = base_url[len(before_query):]
+        base_url = before_query.rstrip("/") + ".m3u8" + query_part
+
+    if "?" in base_url:
+        final_url = base_url + "&" + param_str
+    else:
+        final_url = base_url + "?" + param_str
+
+    if parsed.get("canPlayFHD") is True:
+        final_url += "&h=1"
+
+    logger.info(f"✅ VixCloud M3U8: {final_url[:120]}")
+    return final_url
+
+
+# ---------------------------------------------------------------------------
+# Funzione principale: VixSrc URL -> M3U8
+# ---------------------------------------------------------------------------
+
+async def extract_m3u8(page_url: str) -> Optional[str]:
+    """
+    Dato un URL VixSrc (/tv/... o /movie/...) restituisce l'URL M3U8 HLS.
+    Usa fetch HTTP puro (niente browser headless).
+    """
+    async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+        try:
+            embed_url = await _get_vixcloud_embed(page_url, client)
+            if not embed_url:
+                return None
+            return await _extract_m3u8_from_embed(embed_url, client)
+        except httpx.HTTPStatusError as e:
+            logger.error(f"❌ HTTP {e.response.status_code} per {e.request.url}")
+        except httpx.RequestError as e:
+            logger.error(f"❌ Request error: {e}")
+        except Exception as e:
+            logger.error(f"❌ extract_m3u8 errore inatteso: {e}")
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Entry point Stremio
+# ---------------------------------------------------------------------------
 
 async def get_streams(stremio_id: str, content_type: str) -> Dict:
     result: Dict = {"streams": []}
