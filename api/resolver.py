@@ -48,18 +48,18 @@ _HEADERS = {
 
 _TIMEOUT = httpx.Timeout(20.0)
 
+# Regex per trovare iframe con URL vixcloud nell'attributo src
+_IFRAME_VIXCLOUD_RE = re.compile(
+    r'<iframe[^>]+src=["\']([^"\']*vixcloud[^"\']*)["\']',
+    re.IGNORECASE,
+)
+
 
 # ---------------------------------------------------------------------------
 # Costruisce URL proxy interno
 # ---------------------------------------------------------------------------
 
 def build_proxy_url(m3u8_url: str, addon_base_url: str, extra_headers: dict | None = None) -> str:
-    """
-    Restituisce l'URL del proxy HLS interno:
-      http://<host>/proxy/manifest.m3u8?url=<encoded_m3u8>[&headers=<b64>]
-    Il parametro headers (opzionale) serve per provider come VidXgo che
-    richiedono Origin/Referer/UA specifici sui segmenti CDN.
-    """
     base = addon_base_url.rstrip("/")
     encoded = quote(m3u8_url, safe="")
     url = f"{base}/proxy/manifest.m3u8?url={encoded}"
@@ -73,14 +73,6 @@ def build_proxy_url(m3u8_url: str, addon_base_url: str, extra_headers: dict | No
 # ---------------------------------------------------------------------------
 
 async def _get_vixcloud_embed(vixsrc_url: str, client: httpx.AsyncClient) -> Optional[str]:
-    """
-    VixSrc è una SPA Inertia.js: l'iframe NON compare nell'HTML statico.
-    Replicando streamvix/extractor.ts getDirectStream():
-      - Chiama /api/tv/<tmdb>/<s>/<e> o /api/movie/<tmdb> per ottenere {"src": "/embed/..."}
-      - Costruisce l'URL embed assoluto e lo restituisce
-    Fallback: se l'API non ha un campo "src", fetcha la pagina con x-inertia header
-    e cerca l'iframe nel JSON Inertia iniettato nel div#app[data-page].
-    """
     parsed = urlparse(vixsrc_url)
     origin = f"{parsed.scheme}://{parsed.netloc}"
     path = parsed.path.rstrip("/")
@@ -159,11 +151,7 @@ async def _get_vixcloud_embed(vixsrc_url: str, client: httpx.AsyncClient) -> Opt
                 except Exception as e:
                     logger.debug(f"[vixsrc] data-page parse error: {e}")
 
-            mi = re.search(r'<iframe[^>]+src=[\"\'](?:https?:)?//((?:[^\"\'])*vixcloud(?:[^\"\'])*)[\"\']]', html, re.IGNORECASE)
-            if not mi:
-                mi = re.search(r'<iframe[^>]+src=[\"\\']((?:https?:)?//[^\\"\']*vixcloud[^\\"\']*)[\\"\\']]', html, re.IGNORECASE)
-            if not mi:
-                mi = re.search(r'<iframe[^>]+src=["\']([^"\']*vixcloud[^"\']*)["\']', html, re.IGNORECASE)
+            mi = _IFRAME_VIXCLOUD_RE.search(html)
             if mi:
                 embed_url = mi.group(1)
                 if embed_url.startswith("//"):
@@ -332,13 +320,11 @@ async def get_streams(stremio_id: str, content_type: str, addon_base_url: str = 
         episode    = parts[2] if len(parts) > 2 else None
         is_series  = content_type == "series" and season and episode
 
-        # Risolvi TMDB ID (necessario per VixSrc)
         tmdb_id, tmdb_title = await get_tmdb_info(content_id, content_type)
         if not tmdb_id:
             logger.warning(f"⚠️ TMDB ID non trovato per {content_id}")
             return result
 
-        # Costruisci URL VixSrc
         if is_series:
             page_url = f"{SC_DOMAIN}/tv/{tmdb_id}/{season}/{episode}/"
             ep_title_task = asyncio.create_task(get_episode_title(tmdb_id, season, episode))
@@ -348,8 +334,6 @@ async def get_streams(stremio_id: str, content_type: str, addon_base_url: str = 
 
         logger.info(f"🎬 VixSrc page: {page_url}")
 
-        # VidXgo: funziona solo con IMDB ID (formato "tt1234567")
-        # Se content_id inizia con "tt" è già l'IMDB ID; altrimenti non supportato
         vidxgo_task = None
         if content_id.startswith("tt"):
             imdb_id = content_id
@@ -362,7 +346,6 @@ async def get_streams(stremio_id: str, content_type: str, addon_base_url: str = 
         else:
             logger.info(f"[VidXgo] content_id '{content_id}' non è un IMDB ID, VidXgo saltato")
 
-        # Lancia VixCloud ed eventuale VidXgo in parallelo
         if vidxgo_task:
             vixcloud_m3u8, vidxgo_result = await asyncio.gather(
                 extract_m3u8(page_url),
@@ -373,13 +356,11 @@ async def get_streams(stremio_id: str, content_type: str, addon_base_url: str = 
             vixcloud_m3u8 = await extract_m3u8(page_url)
             vidxgo_result = None
 
-        # Risolvi titolo episodio se serie
         if is_series and ep_title_task:
             content_label = (await ep_title_task) or tmdb_title or ""
         else:
             content_label = tmdb_title or "Film"
 
-        # --- Stream VixCloud ---
         if isinstance(vixcloud_m3u8, str) and vixcloud_m3u8:
             stream_url = build_proxy_url(vixcloud_m3u8, addon_base_url)
             logger.info(f"✅ VixCloud stream: {stream_url[:80]}...")
@@ -387,15 +368,11 @@ async def get_streams(stremio_id: str, content_type: str, addon_base_url: str = 
                 "name": "UFO\n🇮🇹 VixCloud",
                 "title": content_label,
                 "url": stream_url,
-                "behaviorHints": {
-                    "notWebReady": True,
-                    "bingeGroup": "ufo-vixcloud",
-                },
+                "behaviorHints": {"notWebReady": True, "bingeGroup": "ufo-vixcloud"},
             })
         else:
             logger.error(f"❌ VixCloud: impossibile estrarre M3U8 per {page_url}")
 
-        # --- Stream VidXgo ---
         if isinstance(vidxgo_result, dict) and vidxgo_result:
             vidxgo_stream_url = build_proxy_url(
                 vidxgo_result["m3u8"],
@@ -407,10 +384,7 @@ async def get_streams(stremio_id: str, content_type: str, addon_base_url: str = 
                 "name": "UFO\n🎯 VidXgo",
                 "title": content_label,
                 "url": vidxgo_stream_url,
-                "behaviorHints": {
-                    "notWebReady": True,
-                    "bingeGroup": "ufo-vidxgo",
-                },
+                "behaviorHints": {"notWebReady": True, "bingeGroup": "ufo-vidxgo"},
             })
         elif vidxgo_task is not None:
             logger.warning(f"[VidXgo] estrazione fallita per {content_id}")
