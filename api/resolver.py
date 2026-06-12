@@ -9,7 +9,8 @@ Logica VixSrc (invariata):
   5. Aggiunge &h=1 se canPlayFHD === true
 
 Logica VidXgo (nuova):
-  - Cerca l'IMDB ID tramite TMDB API
+  - Usa l'IMDB ID direttamente se content_id inizia con "tt",
+    altrimenti salta VidXgo (TMDB-only IDs non supportati da VidXgo)
   - GET {VIDXGO_DOMAIN}/{imdb_id} con UA Firefox-150
   - Decripta il 6° script tag (XOR con chiave ciclica)
   - Estrae l'URL HLS dal JS decriptato
@@ -30,7 +31,7 @@ import httpx
 
 from .config import SC_DOMAIN, USER_AGENT
 from .proxy import encode_headers_b64
-from .tmdb import get_tmdb_info, get_episode_title, get_imdb_id
+from .tmdb import get_tmdb_info, get_episode_title
 from .vidxgo import fetch_vidxgo, VIDXGO_DEFAULT_DOMAIN
 
 logger = logging.getLogger(__name__)
@@ -158,7 +159,11 @@ async def _get_vixcloud_embed(vixsrc_url: str, client: httpx.AsyncClient) -> Opt
                 except Exception as e:
                     logger.debug(f"[vixsrc] data-page parse error: {e}")
 
-            mi = re.search(r'<iframe[^>]+src=["\']((?:https?:)?//[^"\']*vixcloud[^"\']*)["\']', html, re.IGNORECASE)
+            mi = re.search(r'<iframe[^>]+src=[\"\'](?:https?:)?//((?:[^\"\'])*vixcloud(?:[^\"\'])*)[\"\']]', html, re.IGNORECASE)
+            if not mi:
+                mi = re.search(r'<iframe[^>]+src=[\"\\']((?:https?:)?//[^\\"\']*vixcloud[^\\"\']*)[\\"\\']]', html, re.IGNORECASE)
+            if not mi:
+                mi = re.search(r'<iframe[^>]+src=["\']([^"\']*vixcloud[^"\']*)["\']', html, re.IGNORECASE)
             if mi:
                 embed_url = mi.group(1)
                 if embed_url.startswith("//"):
@@ -343,10 +348,11 @@ async def get_streams(stremio_id: str, content_type: str, addon_base_url: str = 
 
         logger.info(f"🎬 VixSrc page: {page_url}")
 
-        # Costruisci URL VidXgo (usa IMDB ID se disponibile, altrimenti salta)
+        # VidXgo: funziona solo con IMDB ID (formato "tt1234567")
+        # Se content_id inizia con "tt" è già l'IMDB ID; altrimenti non supportato
         vidxgo_task = None
-        imdb_id = await get_imdb_id(content_id, content_type)
-        if imdb_id:
+        if content_id.startswith("tt"):
+            imdb_id = content_id
             vidxgo_embed_url = f"{VIDXGO_DEFAULT_DOMAIN}/{imdb_id}"
             logger.info(f"🎯 VidXgo embed: {vidxgo_embed_url}")
             async with httpx.AsyncClient(timeout=httpx.Timeout(20.0), follow_redirects=True) as vidxgo_client:
@@ -354,7 +360,7 @@ async def get_streams(stremio_id: str, content_type: str, addon_base_url: str = 
                     fetch_vidxgo(vidxgo_embed_url, vidxgo_client)
                 )
         else:
-            logger.info(f"[VidXgo] IMDB ID non disponibile per {content_id}, skip")
+            logger.info(f"[VidXgo] content_id '{content_id}' non è un IMDB ID, VidXgo saltato")
 
         # Lancia VixCloud ed eventuale VidXgo in parallelo
         if vidxgo_task:
