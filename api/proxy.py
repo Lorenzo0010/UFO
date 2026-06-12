@@ -1,21 +1,15 @@
 """
 proxy.py — Proxy HLS interno per UFO.
 
-Gestisce manifest M3U8 e segmenti .ts iniettando i giusti header
-(Referer, Origin, User-Agent) verso vixsrc.to, senza dipendenze esterne.
-
-Endpoint:
-  GET /proxy/manifest.m3u8?url=<encoded_m3u8_url>
-  GET /proxy/segment?url=<encoded_segment_url>
-
-Il manifest viene riscritto: ogni URL di segmento/variant viene
-sostituito con un URL che punta a /proxy/segment?url=...
-così tutti i chunk passano dal proxy e ricevono i giusti header.
+Fix applicati:
+  1. Aggiunta route HEAD /proxy/manifest.m3u8 → Stremio non riceve più 405
+  2. _rewrite_manifest ora riscrive anche URI in #EXT-X-KEY → enc.key non
+     viene più cercato localmente ma proxiato da vixsrc.to
 """
 
 import logging
 import re
-from urllib.parse import quote, urljoin, urlparse, urlunparse
+from urllib.parse import quote, urljoin, urlparse
 
 import httpx
 from fastapi import APIRouter, HTTPException, Request
@@ -57,62 +51,72 @@ async def close_proxy_client() -> None:
 def _rewrite_manifest(content: str, original_url: str, proxy_base: str) -> str:
     """
     Riscrive un manifest M3U8 sostituendo tutti gli URL con URL proxy.
-    Gestisce sia master playlist (riferimenti a .m3u8 di qualità)
-    sia media playlist (riferimenti a segmenti .ts / .aac / ecc.)
+    - Righe URL (segmenti, variant playlist)
+    - URI="..." in qualsiasi direttiva (#EXT-X-MAP, #EXT-X-KEY, ecc.)
     """
     lines = content.splitlines(keepends=True)
     rewritten = []
 
+    def proxify_uri(raw: str) -> str:
+        abs_url = _make_absolute(raw, original_url)
+        parsed = urlparse(abs_url)
+        if parsed.path.endswith(".m3u8") or ".m3u8?" in parsed.path:
+            return f"{proxy_base}/manifest.m3u8?url={quote(abs_url, safe='')}"
+        return f"{proxy_base}/segment?url={quote(abs_url, safe='')}"
+
     for line in lines:
         stripped = line.strip()
 
-        # Salta commenti e righe vuote
-        if not stripped or stripped.startswith("#"):
-            # Gestisci URI inline nelle direttive EXT-X-MAP e simili
-            def replace_uri(m):
-                raw = m.group(1)
-                abs_url = _make_absolute(raw, original_url)
-                return f'URI="{proxy_base}/segment?url={quote(abs_url, safe="")}"]'
+        if not stripped:
+            rewritten.append(line)
+            continue
 
-            # EXT-X-MAP:URI="..."
+        if stripped.startswith("#"):
+            # Riscrive tutti gli URI="..." nelle direttive HLS
+            # Copre: #EXT-X-KEY, #EXT-X-MAP, #EXT-X-MEDIA, ecc.
             if 'URI="' in stripped:
                 line = re.sub(
                     r'URI="([^"]+)"',
-                    lambda m: f'URI="{proxy_base}/segment?url={quote(_make_absolute(m.group(1), original_url), safe="")}"',
-                    line
+                    lambda m: f'URI="{proxify_uri(m.group(1))}"',
+                    line,
                 )
             rewritten.append(line)
             continue
 
-        # È un URL (segmento o variant playlist)
-        abs_url = _make_absolute(stripped, original_url)
-        parsed = urlparse(abs_url)
-
-        if parsed.path.endswith(".m3u8") or ".m3u8?" in parsed.path:
-            # Variant playlist → punta a /proxy/manifest.m3u8?url=...
-            proxied = f"{proxy_base}/manifest.m3u8?url={quote(abs_url, safe='')}"
-        else:
-            # Segmento media → punta a /proxy/segment?url=...
-            proxied = f"{proxy_base}/segment?url={quote(abs_url, safe='')}"
-
-        rewritten.append(proxied + "\n")
+        # Riga URL (segmento o variant playlist)
+        rewritten.append(proxify_uri(stripped) + "\n")
 
     return "".join(rewritten)
 
 
 def _make_absolute(url: str, base: str) -> str:
-    """Converte un URL relativo in assoluto usando base come riferimento."""
     if url.startswith("http://") or url.startswith("https://"):
         return url
     return urljoin(base, url)
 
 
 def _proxy_base(request: Request) -> str:
-    """Restituisce la base URL del proxy (es. http://192.168.1.77:8080/proxy)."""
     base = str(request.base_url).rstrip("/")
     return f"{base}/proxy"
 
 
+# ── HEAD: risponde 200 con gli stessi header del GET ─────────────────────────
+@router.head("/manifest.m3u8")
+async def proxy_manifest_head(url: str, request: Request):
+    """Risponde alle richieste HEAD di Stremio senza fetchare il manifest."""
+    if not url:
+        raise HTTPException(status_code=400, detail="Parametro 'url' mancante")
+    return Response(
+        content=b"",
+        media_type="application/vnd.apple.mpegurl",
+        headers={
+            "Access-Control-Allow-Origin": "*",
+            "Cache-Control": "no-cache",
+        },
+    )
+
+
+# ── GET manifest ──────────────────────────────────────────────────────────────
 @router.get("/manifest.m3u8")
 async def proxy_manifest(url: str, request: Request):
     """Fetcha e riscrive un manifest M3U8."""
@@ -128,8 +132,7 @@ async def proxy_manifest(url: str, request: Request):
             logger.warning(f"[proxy] manifest HTTP {resp.status_code} per {url[:80]}")
             raise HTTPException(status_code=resp.status_code, detail="Upstream error")
 
-        content = resp.text
-        rewritten = _rewrite_manifest(content, url, _proxy_base(request))
+        rewritten = _rewrite_manifest(resp.text, url, _proxy_base(request))
 
         return Response(
             content=rewritten,
@@ -144,9 +147,10 @@ async def proxy_manifest(url: str, request: Request):
         raise HTTPException(status_code=502, detail="Upstream non raggiungibile")
 
 
+# ── GET segmento ──────────────────────────────────────────────────────────────
 @router.get("/segment")
 async def proxy_segment(url: str):
-    """Proxia un singolo segmento media (.ts, .aac, ecc.) in streaming."""
+    """Proxia un singolo segmento media (.ts, .aac, chiave AES, ecc.) in streaming."""
     if not url:
         raise HTTPException(status_code=400, detail="Parametro 'url' mancante")
 
