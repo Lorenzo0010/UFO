@@ -15,6 +15,25 @@ USER_AGENT   = os.getenv("USER_AGENT", "Mozilla/5.0 (Windows NT 10.0; Win64; x64
 EASYPROXY_URL = os.getenv("EASYPROXY_URL", "").rstrip("/")
 EASYPROXY_PSW = os.getenv("EASYPROXY_PASSWORD", "")
 
+# ── IPTV Live TV ─────────────────────────────────────────────────────────────
+# Lista di URL M3U/M3U8 da usare come sorgenti canali live.
+# Puoi aggiungere ulteriori URL separati da virgola nella variabile d'ambiente
+# IPTV_URLS oppure modificare la lista DEFAULT_IPTV_URLS qui sotto.
+DEFAULT_IPTV_URLS = [
+    "https://raw.githubusercontent.com/maginetweb-arch/TVITALIA/refs/heads/main/iptvit.m3u",
+    "https://raw.githubusercontent.com/Free-TV/IPTV/refs/heads/master/playlists/playlist_italy.m3u8",
+]
+
+_env_iptv = os.getenv("IPTV_URLS", "")
+IPTV_URLS: list[str] = (
+    [u.strip() for u in _env_iptv.split(",") if u.strip()]
+    if _env_iptv
+    else DEFAULT_IPTV_URLS
+)
+
+# Numero massimo di canali per pagina nel catalogo
+IPTV_PAGE_SIZE = int(os.getenv("IPTV_PAGE_SIZE", "100"))
+
 
 def validate_config() -> None:
     """Verifica che le variabili obbligatorie siano presenti all'avvio."""
@@ -30,3 +49,7 @@ def validate_config() -> None:
 
     if EASYPROXY_URL:
         logger.info("ℹ️  EASYPROXY_URL impostata ma non usata — il proxy HLS è ora interno")
+
+    logger.info(f"📺 Sorgenti IPTV configurate: {len(IPTV_URLS)}")
+    for u in IPTV_URLS:
+        logger.info(f"   → {u}")
