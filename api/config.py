@@ -4,7 +4,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 ADDON_NAME   = "UFO addon"
-ADDON_LOGO   = "https://static.vecteezy.com/system/resources/thumbnails/050/270/611/small/ufo-logo-design-no-background-perfect-for-print-on-demand-t-shirt-design-png.png"
+ADDON_LOGO   = "https://images.seeklogo.com/logo-png/14/2/ufo-plast-logo-png_seeklogo-144349.png"
 
 SC_DOMAIN    = os.getenv("SC_DOMAIN", "https://vixsrc.to")
 TMDB_API_KEY = os.getenv("TMDB_KEY", "")
