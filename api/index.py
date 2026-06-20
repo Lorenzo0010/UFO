@@ -6,7 +6,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from .config import ADDON_NAME, ADDON_LOGO, validate_config
+from .config import ADDON_NAME, ADDON_LOGO, ADDON_BASE_URL, validate_config
 from .proxy import router as proxy_router, close_proxy_client
 from .resolver import get_streams
 from .tmdb import close_session
@@ -37,6 +37,17 @@ app.add_middleware(
 app.include_router(proxy_router)
 
 
+def _get_base(request: Request) -> str:
+    """Restituisce il base URL del proxy.
+    Priorità: ADDON_BASE_URL (env, fisso) > request.base_url (dinamico).
+    ADDON_BASE_URL è necessario quando più client con IP diversi accedono
+    all'addon (es. Stremio desktop + GuardaHD sullo stesso server).
+    """
+    if ADDON_BASE_URL:
+        return ADDON_BASE_URL
+    return str(request.base_url).rstrip("/")
+
+
 def respond_with(data: Any) -> JSONResponse:
     resp = JSONResponse(content=data)
     resp.headers["Access-Control-Allow-Origin"] = "*"
@@ -45,7 +56,7 @@ def respond_with(data: Any) -> JSONResponse:
 
 @app.get("/")
 async def root(request: Request):
-    base = str(request.base_url).rstrip("/")
+    base = _get_base(request)
     return respond_with({
         "status": "online",
         "addon": ADDON_NAME,
@@ -74,7 +85,7 @@ async def streams_route(type: str, id: str, request: Request):
     if type not in ("movie", "series"):
         raise HTTPException(status_code=404)
     try:
-        base = str(request.base_url).rstrip("/")
+        base = _get_base(request)
         data = await get_streams(id, type, addon_base_url=base)
     except Exception:
         logger.exception(f"❌ Errore non gestito in streams_route per id={id!r} type={type!r}")

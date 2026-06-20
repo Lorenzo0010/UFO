@@ -14,6 +14,12 @@ USER_AGENT   = os.getenv("USER_AGENT", "Mozilla/5.0 (Windows NT 10.0; Win64; x64
 VIDXGO_DOMAIN  = os.getenv("VIDXGO_DOMAIN", "https://v.vidxgo.co")
 VIDXGO_ENABLED = os.getenv("VIDXGO_ENABLED", "1")   # imposta 0 per disabilitare
 
+# Base URL fisso per il proxy interno — OBBLIGATORIO se si usa GuardaHD o
+# qualsiasi client che accede da un IP diverso da quello che ha fatto la
+# richiesta /stream. Es: http://192.168.1.77:7000
+# Se non impostato, si usa request.base_url come fallback (single-client only).
+ADDON_BASE_URL = os.getenv("ADDON_BASE_URL", "").rstrip("/")
+
 # EasyProxy rimosso — il proxy HLS è ora interno a UFO
 # Mantenuto per retrocompatibilità ma non più usato
 EASYPROXY_URL = os.getenv("EASYPROXY_URL", "").rstrip("/")
@@ -34,5 +40,10 @@ def validate_config() -> None:
 
     if EASYPROXY_URL:
         logger.info("ℹ️  EASYPROXY_URL impostata ma non usata — il proxy HLS è ora interno")
+
+    if ADDON_BASE_URL:
+        logger.info(f"ℹ️  ADDON_BASE_URL (fisso): {ADDON_BASE_URL}")
+    else:
+        logger.warning("⚠️  ADDON_BASE_URL non impostata — uso request.base_url (potrebbe rompere GuardaHD/multi-client)")
 
     logger.info(f"ℹ️  VidXgo: {'abilitato' if VIDXGO_ENABLED not in ('0','false','off','no') else 'disabilitato'} ({VIDXGO_DOMAIN})")
