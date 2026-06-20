@@ -1,16 +1,20 @@
 """
-resolver.py — estrazione M3U8 da VixSrc/VixCloud.
+resolver.py — estrazione M3U8 da VixSrc/VixCloud + VidXgo.
 
-Flusso:
-  1. GET /api/tv/<tmdb>/<s>/<e>  oppure  /api/movie/<tmdb>
-     → JSON con campo "src" che contiene l'URL embed VixCloud
-  2. GET sull'embed con header Referer/Origin corretti
-  3. Trova lo script inline con 'token'/'expires'/url (pattern o masterPlaylist)
-  4. Costruisce URL HLS finale: token=, expires=, [h=1 se canPlayFHD]
-  5. Verifica HEAD sull'URL VixSrc (checkUrlExists) — skip se VIXSRC_SKIP_LIST_CHECK=1
+Flusso per VixSrc/VixCloud (invariato):
+  1. GET /api/tv/<tmdb>/<s>/<e> oppure /api/movie/<tmdb>
+  2. Estrai URL embed VixCloud
+  3. Estrai token/expires/url dallo script embed
+  4. Costruisci URL HLS con token, expires, [h=1 se canPlayFHD]
+  5. Verifica HEAD su VixSrc (skip con VIXSRC_SKIP_LIST_CHECK=1)
 
-I segmenti HLS vengono proxiati dal proxy interno (proxy.py) che aggiunge
-automaticamente i Referer/Origin VixSrc corretti.
+Flusso per VidXgo (nuovo):
+  - Richiede IMDB ID (risolto da TMDB)
+  - Costruisce {VIDXGO_DOMAIN}/{imdb_id}[/{s}/{e}]
+  - Passa l'URL al proxy HLS interno (come VixCloud)
+  - Entrambe le fonti vengono lanciate in parallelo con asyncio.gather()
+
+I segmenti HLS vengono proxiati dal proxy interno (proxy.py).
 """
 
 from __future__ import annotations
@@ -28,6 +32,7 @@ import httpx
 from .config import SC_DOMAIN, USER_AGENT
 from .proxy import encode_headers_b64
 from .tmdb import get_tmdb_info, get_episode_title
+from .vidxgo import resolve_vidxgo
 
 logger = logging.getLogger(__name__)
 
@@ -48,13 +53,13 @@ _HEADERS: dict = {
 _TIMEOUT = httpx.Timeout(20.0)
 
 _IFRAME_VIXCLOUD_RE = re.compile(
-    r'<iframe[^>]+src=["\']([^"\']*vixcloud[^"\']*)["\']',
+    r'<iframe[^>]+src=["\'](["\']*vixcloud[^"\']*)["\']',
     re.IGNORECASE,
 )
 
 
 # ---------------------------------------------------------------------------
-# checkUrlExists
+# checkUrlExists (VixSrc)
 # ---------------------------------------------------------------------------
 
 async def check_url_exists(url: str) -> bool:
@@ -81,7 +86,6 @@ async def check_url_exists(url: str) -> bool:
         if resp.status_code == 404:
             logger.info(f"[VixSrc][Check] 404 -> {url}")
             return False
-        # Status bloccato (403, 429, 5xx): assume True per evitare falsi negativi
         logger.warning(f"[VixSrc][Check] Status bloccato ({resp.status_code}), assumo esistente")
         return True
     except Exception as e:
@@ -132,7 +136,6 @@ async def _get_vixcloud_embed(vixsrc_url: str) -> Optional[str]:
     origin = f"{parsed.scheme}://{parsed.netloc}"
     path   = parsed.path.rstrip("/")
 
-    # Prova prima la API /api/tv/ o /api/movie/
     api_path = path.replace("/tv/", "/api/tv/", 1).replace("/movie/", "/api/movie/", 1)
     api_url  = f"{origin}{api_path}"
     logger.info(f"🔌 VixSrc API: {api_url}")
@@ -162,7 +165,6 @@ async def _get_vixcloud_embed(vixsrc_url: str) -> Optional[str]:
         except Exception as e:
             logger.warning(f"[vixsrc] API request error: {e}")
 
-        # Fallback: pagina Inertia con x-inertia: true
         logger.info(f"[vixsrc] Fallback Inertia: {vixsrc_url}")
         inertia_headers = {**_HEADERS, "x-inertia": "true", "Referer": f"{origin}/"}
 
@@ -256,7 +258,6 @@ async def _extract_m3u8_from_embed(embed_url: str, referer: str) -> Optional[str
         resp.raise_for_status()
     html = resp.text
 
-    # Cerca script con token/expires
     script_tag: Optional[str] = None
     for m in re.finditer(r"<script[^>]*>([\s\S]*?)</script>", html, re.IGNORECASE):
         c = m.group(1)
@@ -273,8 +274,7 @@ async def _extract_m3u8_from_embed(embed_url: str, referer: str) -> Optional[str
         logger.warning(f"[vixcloud] Nessuno script token/masterPlaylist in {embed_url[:80]}")
         return None
 
-    # --- Pattern 1: token/expires/url ---
-    token_m   = re.search(r"['\"]token['\"]\s*:\s*['\"]([\\w-]+)['\"]", script_tag)
+    token_m   = re.search(r"['\"]token['\"]\s*:\s*['\"]([\w-]+)['\"]", script_tag)
     expires_m = re.search(r"['\"]expires['\"]\s*:\s*['\"]?(\d+)['\"]?", script_tag)
     url_m     = re.search(r"url\s*:\s*['\"]([^'\"]+)['\"]", script_tag)
 
@@ -303,7 +303,6 @@ async def _extract_m3u8_from_embed(embed_url: str, referer: str) -> Optional[str
         logger.info(f"✅ VixCloud M3U8 (token): {final_url[:120]}")
         return final_url
 
-    # --- Pattern 2: window.masterPlaylist ---
     parsed = _parse_window_vars(script_tag)
     if parsed:
         master = parsed.get("masterPlaylist")
@@ -327,7 +326,6 @@ async def _extract_m3u8_from_embed(embed_url: str, referer: str) -> Optional[str
             logger.info(f"✅ VixCloud M3U8 (masterPlaylist): {final_url[:120]}")
             return final_url
 
-    # --- Fallback regex ---
     m_fb = re.search(r'"url"\s*:\s*"([^"]+\.m3u8[^"]*)"', script_tag)
     if m_fb:
         logger.info(f"[vixcloud] Fallback regex URL: {m_fb.group(1)[:80]}")
@@ -336,10 +334,6 @@ async def _extract_m3u8_from_embed(embed_url: str, referer: str) -> Optional[str
     logger.warning(f"[vixcloud] Impossibile estrarre M3U8 da {embed_url[:80]}")
     return None
 
-
-# ---------------------------------------------------------------------------
-# extract_m3u8: entry point VixSrc URL -> M3U8
-# ---------------------------------------------------------------------------
 
 async def extract_m3u8(page_url: str) -> Optional[str]:
     try:
@@ -357,7 +351,54 @@ async def extract_m3u8(page_url: str) -> Optional[str]:
 
 
 # ---------------------------------------------------------------------------
-# get_streams: entry point Stremio
+# Resolver VixCloud (wrappato per asyncio.gather)
+# ---------------------------------------------------------------------------
+
+async def _resolve_vixcloud(
+    page_url: str,
+    content_label: str,
+    addon_base_url: str,
+    is_series: bool,
+    season: Optional[str],
+    episode: Optional[str],
+    ep_title_task,
+) -> Optional[Dict]:
+    """Wrapper async per VixSrc/VixCloud compatibile con asyncio.gather()."""
+    try:
+        exists = await check_url_exists(page_url)
+        if not exists:
+            logger.warning(f"⚠️ Contenuto non trovato su VixSrc: {page_url}")
+            return None
+
+        vixcloud_m3u8 = await extract_m3u8(page_url)
+
+        if is_series and ep_title_task:
+            label = (await ep_title_task) or content_label
+        else:
+            label = content_label
+
+        if not (isinstance(vixcloud_m3u8, str) and vixcloud_m3u8):
+            logger.error(f"❌ VixCloud: impossibile estrarre M3U8 per {page_url}")
+            return None
+
+        stream_url = build_proxy_url(vixcloud_m3u8, addon_base_url)
+        logger.info(f"✅ VixCloud stream pronto: {stream_url[:80]}...")
+        return {
+            "name": "UFO\n🇮🇹 Streaming Community",
+            "title": label,
+            "url": stream_url,
+            "behaviorHints": {
+                "notWebReady": True,
+                "bingeGroup": "ufo-vixcloud",
+            },
+        }
+    except Exception as e:
+        logger.error(f"❌ _resolve_vixcloud error: {e}")
+        return None
+
+
+# ---------------------------------------------------------------------------
+# get_streams: entry point Stremio — multi-source
 # ---------------------------------------------------------------------------
 
 async def get_streams(
@@ -370,6 +411,8 @@ async def get_streams(
       stremio_id      es. "tt1234567" oppure "tt1234567:2:3"
       content_type    "movie" | "series"
       addon_base_url  base URL dell'addon per costruire URL proxy interno
+
+    Lancia VixCloud e VidXgo in parallelo; restituisce tutti gli stream validi.
     """
     result: Dict = {"streams": []}
     try:
@@ -384,6 +427,12 @@ async def get_streams(
             logger.warning(f"⚠️ TMDB ID non trovato per {content_id}")
             return result
 
+        content_label = tmdb_title or ("Serie TV" if is_series else "Film")
+
+        # IMDB ID: se stremio_id già inizia con "tt" lo usiamo direttamente,
+        # altrimenti content_id è un TMDB id numerico e VidXgo non può usarlo.
+        imdb_id: Optional[str] = content_id if content_id.startswith("tt") else None
+
         if is_series:
             page_url      = f"{SC_DOMAIN}/tv/{tmdb_id}/{season}/{episode}/"
             ep_title_task = asyncio.create_task(get_episode_title(tmdb_id, season, episode))
@@ -393,32 +442,33 @@ async def get_streams(
 
         logger.info(f"🎬 VixSrc page: {page_url}")
 
-        exists = await check_url_exists(page_url)
-        if not exists:
-            logger.warning(f"⚠️ Contenuto non trovato su VixSrc: {page_url}")
-            return result
+        # --- Lancia VixCloud e VidXgo in parallelo ---
+        vixcloud_coro = _resolve_vixcloud(
+            page_url, content_label, addon_base_url,
+            is_series, season, episode, ep_title_task
+        )
 
-        vixcloud_m3u8 = await extract_m3u8(page_url)
-
-        if is_series and ep_title_task:
-            content_label = (await ep_title_task) or tmdb_title or ""
+        if imdb_id:
+            vidxgo_coro = resolve_vidxgo(
+                imdb_id, content_label, content_type,
+                season, episode, addon_base_url
+            )
         else:
-            content_label = tmdb_title or "Film"
+            async def _noop():
+                return None
+            vidxgo_coro = _noop()
 
-        if isinstance(vixcloud_m3u8, str) and vixcloud_m3u8:
-            stream_url = build_proxy_url(vixcloud_m3u8, addon_base_url)
-            logger.info(f"✅ VixCloud stream pronto: {stream_url[:80]}...")
-            result["streams"].append({
-                "name": "UFO\n🇮🇹 Streaming Community",
-                "title": content_label,
-                "url": stream_url,
-                "behaviorHints": {
-                    "notWebReady": True,
-                    "bingeGroup": "ufo-vixcloud",
-                },
-            })
-        else:
-            logger.error(f"❌ VixCloud: impossibile estrarre M3U8 per {page_url}")
+        vixcloud_stream, vidxgo_stream = await asyncio.gather(
+            vixcloud_coro,
+            vidxgo_coro,
+            return_exceptions=True,
+        )
+
+        for stream in (vixcloud_stream, vidxgo_stream):
+            if isinstance(stream, Exception):
+                logger.error(f"❌ Provider exception: {stream}")
+            elif isinstance(stream, dict):
+                result["streams"].append(stream)
 
     except Exception as e:
         logger.error(f"❌ get_streams error: {e}")
