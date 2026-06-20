@@ -4,20 +4,16 @@ vidxgo.py — Provider VidXgo per UFO.
 URL pattern (movie):  {VD_DOMAIN}/{imdb_id}
 URL pattern (series): {VD_DOMAIN}/{imdb_id}/{season}/{episode}
 
-Note sul 403 / blocco ASN:
-  VidXgo risponde 403 alle richieste HEAD provenienti da IP di datacenter
-  (VPS, cloud, home server su AS commerciale). Questo NON significa che il
-  contenuto sia assente — è un blocco sul check preliminare.
-  Il proxy HLS interno di UFO fa la richiesta reale con Referer/Origin
-  corretti: se il contenuto non esiste, il proxy riceve 404/403 e il
-  client (Stremio) mostra "stream non disponibile" senza crash.
-  Pertanto il check HEAD preliminare è stato rimosso: non aggiunge valore
-  e causa falsi negativi sistematici da server.
+Perché serve EasyProxy:
+  VidXgo firma ogni segmento .ts con un token TTL ~5 minuti (param `e=` epoch ms).
+  Un proxy HLS passivo (come proxy.py di UFO) legge il manifest una volta e
+  forwarda i segmenti: dopo ~5 min il token scade e la riproduzione si interrompe.
+  EasyProxy ha un loop interno che rinnova il token in background e riscrive
+  i segmenti al volo — stessa architettura usata da StreamVix.
 
-VidXgo firma ogni segmento .ts con token TTL ~5 min (param `e=` epoch ms).
-Il proxy HLS interno di UFO è sufficiente perché lavora a livello di
-manifest e richiede i segmenti al volo — non è necessario ruotare il
-token tra diversi player.
+  Se EASYPROXY_URL non è configurata, lo stream viene comunque proposto
+  tramite il proxy HLS interno di UFO (funzionerà per film brevi o
+  visualizzazioni < 5 min, poi il player mostra errore).
 """
 
 from __future__ import annotations
@@ -25,7 +21,7 @@ from __future__ import annotations
 import logging
 import os
 from typing import Dict, Optional
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +31,10 @@ logger = logging.getLogger(__name__)
 
 VD_DOMAIN: str = os.getenv("VIDXGO_DOMAIN", "https://v.vidxgo.co").rstrip("/")
 VIDXGO_ENABLED: bool = os.getenv("VIDXGO_ENABLED", "1").lower() not in ("0", "false", "off", "no")
+
+# EasyProxy — token rotation per VidXgo
+EASYPROXY_URL: str = os.getenv("EASYPROXY_URL", "").rstrip("/")
+EASYPROXY_PSW: str = os.getenv("EASYPROXY_PASSWORD", "")
 
 
 # ---------------------------------------------------------------------------
@@ -49,14 +49,22 @@ def _build_embed_url(imdb_id: str, season: Optional[str], episode: Optional[str]
     return f"{VD_DOMAIN}/{clean}/{season}/{episode}"
 
 
-def _build_proxy_url(embed_url: str, addon_base_url: str) -> str:
+def _build_ep_url(embed_url: str) -> str:
     """
-    Avvolge l'URL embed VidXgo nel proxy HLS interno di UFO.
+    Wrappa l'URL embed in EasyProxy.
+    EP esegue l'estrazione, cattura il manifest e avvia il loop di rinnovo token.
+    Endpoint: {EP_BASE}/proxy/hls/manifest.m3u8?d=<embed_url>[&api_password=<psw>]
+    """
+    params: dict = {"d": embed_url}
+    if EASYPROXY_PSW:
+        params["api_password"] = EASYPROXY_PSW
+    return f"{EASYPROXY_URL}/proxy/hls/manifest.m3u8?{urlencode(params)}"
 
-    Il proxy:
-    - aggiunge Referer: https://v.vidxgo.co/ e Origin: https://v.vidxgo.co
-    - legge il manifest M3U8 e riscrive i segmenti .ts attraverso se stesso
-    - gestisce 404/403 restituendo errore HTTP al client senza crash
+
+def _build_internal_proxy_url(embed_url: str, addon_base_url: str) -> str:
+    """
+    Fallback: proxy HLS interno di UFO.
+    Funziona ma senza token rotation — riproduzione limitata a ~5 min.
     """
     base = addon_base_url.rstrip("/")
     encoded = quote(embed_url, safe="")
@@ -79,15 +87,9 @@ async def resolve_vidxgo(
     """
     Restituisce un dict stream Stremio oppure None se VidXgo non può essere usato.
 
-    Non esegue alcun check HTTP preliminare: l'URL embed viene passato
-    direttamente al proxy HLS interno di UFO che gestisce eventuali errori.
-
-    Parametri:
-      imdb_id        ID IMDB (es. "tt1234567") — già risolto da get_tmdb_info
-      content_label  Titolo da mostrare in Stremio
-      content_type   "movie" | "series"
-      season / episode  numero stagione/episodio (stringa) o None
-      addon_base_url  base URL dell'addon per il proxy HLS interno
+    Priorità proxy:
+      1. EasyProxy (EASYPROXY_URL impostata) — token rotation, riproduzione completa
+      2. Proxy HLS interno UFO              — no rotation, ~5 min poi errore
     """
     if not VIDXGO_ENABLED:
         logger.debug("[VidXgo] disabilitato (VIDXGO_ENABLED=0)")
@@ -100,8 +102,14 @@ async def resolve_vidxgo(
     is_movie = content_type == "movie"
     embed_url = _build_embed_url(imdb_id, season, episode, is_movie)
 
-    stream_url = _build_proxy_url(embed_url, addon_base_url)
-    logger.info(f"[VidXgo] stream via proxy interno: {embed_url}")
+    if EASYPROXY_URL:
+        stream_url = _build_ep_url(embed_url)
+        proxy_label = f"EasyProxy ({EASYPROXY_URL})"
+    else:
+        stream_url = _build_internal_proxy_url(embed_url, addon_base_url)
+        proxy_label = "proxy interno UFO (no token rotation — imposta EASYPROXY_URL)"
+
+    logger.info(f"[VidXgo] embed: {embed_url} — proxy: {proxy_label}")
 
     binge_group = "ufo-vidxgo-movie" if is_movie else f"ufo-vidxgo-s{season}e{episode}"
     return {
