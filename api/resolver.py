@@ -281,7 +281,7 @@ async def _extract_m3u8_from_embed(embed_url: str, referer: str) -> Optional[str
         logger.warning(f"[vixcloud] Nessuno script token/masterPlaylist in {embed_url[:80]}")
         return None
 
-    token_m   = re.search(r"['\"]token['\"]\s*:\s*['\"]([\\w-]+)['\"]", script_tag)
+    token_m   = re.search(r"['\"]token['\"]\s*:\s*['\"]([\w-]+)['\"]", script_tag)
     expires_m = re.search(r"['\"]expires['\"]\s*:\s*['\"]?(\d+)['\"]?", script_tag)
     url_m     = re.search(r"url\s*:\s*['\"]([^'\"]+)['\"]", script_tag)
 
