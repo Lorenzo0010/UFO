@@ -2,7 +2,8 @@
 guardahd.py — Provider GuardaHD per UFO (solo film).
 
 Flusso:
-  1. Chiama https://guardahd.stream/set-movie-a/{imdb_id}
+  1. Chiama https://guardahd.stream/set-movie-a/{imdb_id}  (endpoint principale)
+     Se non trova link → riprova con /set-movie/{imdb_id}  (endpoint alternativo)
   2. Estrae iframe/data-link con host MixDrop, StreamHG (dhcplay/vibuxer)
   3. Per ogni link valido, estrae l'URL .m3u8 diretto
   4. Restituisce stream Stremio (senza proxy — stream diretti con headers)
@@ -41,6 +42,12 @@ _HEADERS = {
     "Referer": GUARDAHD_BASE,
 }
 
+# Endpoint da provare in ordine
+_GUARDAHD_ENDPOINTS = [
+    "/set-movie-a/{imdb_id}",
+    "/set-movie/{imdb_id}",
+]
+
 
 # ---------------------------------------------------------------------------
 # Extractor helpers
@@ -66,7 +73,6 @@ def _unpack(p: str, a: int, c: int, k: list) -> str:
         else:
             d[_lookup(i)] = _lookup(i)
 
-    # replace tokens
     result = re.sub(r'\b(\w+)\b', lambda m: d.get(m.group(1), m.group(1)), p)
     return result
 
@@ -83,10 +89,14 @@ def _extract_packed_stream(html: str) -> Optional[str]:
     try:
         p, a, c, k = m.group(1), int(m.group(2)), int(m.group(3)), m.group(4).split("|")
         unpacked = _unpack(p, a, c, k)
-        wurl = re.search(r'wurl\s*=\s*["\']([^"\']+)["\']', unpacked)
+        wurl = re.search(r'wurl\s*=\s*["\'](https?://[^"\']+)["\']', unpacked)
         if wurl:
             url = wurl.group(1)
             return ("https:" + url) if url.startswith("//") else url
+        # fallback: cerca direttamente un .m3u8 nell'unpacked
+        m3u8 = re.search(r'(https?://[^\s"\']+\.m3u8[^\s"\']*)', unpacked)
+        if m3u8:
+            return m3u8.group(1)
     except Exception as e:
         logger.debug(f"[GuardaHD] unpack error: {e}")
     return None
@@ -99,6 +109,7 @@ async def _extract_mixdrop(url: str, client: httpx.AsyncClient) -> Optional[str]
             url = "https:" + url
         resp = await client.get(url, headers={**_HEADERS, "Referer": "https://mixdrop.sb/"})
         if not resp.ok:
+            logger.debug(f"[GuardaHD] MixDrop HTTP {resp.status_code} per {url}")
             return None
         html = resp.text
         stream = _extract_packed_stream(html)
@@ -121,17 +132,17 @@ async def _extract_streamhg(url: str, client: httpx.AsyncClient) -> Optional[str
     try:
         if url.startswith("//"):
             url = "https:" + url
-        for candidate in [url]:
-            resp = await client.get(
-                candidate,
-                headers={**_HEADERS, "Referer": url},
-                follow_redirects=True,
-            )
-            if not resp.ok:
-                continue
-            stream = _extract_packed_stream(resp.text)
-            if stream:
-                return stream
+        resp = await client.get(
+            url,
+            headers={**_HEADERS, "Referer": url},
+            follow_redirects=True,
+        )
+        if not resp.ok:
+            logger.debug(f"[GuardaHD] StreamHG HTTP {resp.status_code} per {url}")
+            return None
+        stream = _extract_packed_stream(resp.text)
+        if stream:
+            return stream
     except Exception as e:
         logger.debug(f"[GuardaHD] StreamHG error: {e}")
     return None
@@ -141,39 +152,57 @@ async def _extract_streamhg(url: str, client: httpx.AsyncClient) -> Optional[str
 # Core: fetch GuardaHD page e raccogli link
 # ---------------------------------------------------------------------------
 
+def _parse_links_from_html(html: str) -> List[str]:
+    """Estrae tutti i link candidati dall'HTML di GuardaHD."""
+    links: set = set()
+
+    # iframe src
+    for m in re.finditer(r'<iframe[^>]+src=["\'](https?://[^"\']+)["\']', html, re.IGNORECASE):
+        links.add(m.group(1))
+
+    # data-link
+    for m in re.finditer(r'data-link=["\'](https?://[^"\']+)["\']', html):
+        links.add(m.group(1))
+
+    # URL diretti noti
+    direct_re = re.compile(
+        r'https?://(?:www\.)?(?:mixdrop|m1xdrop|dhcplay|vibuxer|loadm|uqload)[\w./-]+',
+        re.IGNORECASE,
+    )
+    for m in direct_re.finditer(html):
+        links.add(m.group(0))
+
+    return list(links)
+
+
 async def _fetch_guardahd_links(imdb_id: str) -> List[str]:
-    """Chiama /set-movie-a/{imdb_id} e restituisce tutti i link candidati."""
-    url = f"{GUARDAHD_BASE}/set-movie-a/{imdb_id}"
-    try:
-        async with httpx.AsyncClient(timeout=_TIMEOUT, follow_redirects=True) as client:
-            resp = await client.get(url, headers=_HEADERS)
-            if not resp.ok:
-                logger.warning(f"[GuardaHD] HTTP {resp.status_code} per {url}")
-                return []
-            html = resp.text
+    """
+    Prova gli endpoint GuardaHD in ordine e restituisce tutti i link candidati.
+    Tenta /set-movie-a/{imdb_id} prima, poi /set-movie/{imdb_id} come fallback.
+    """
+    async with httpx.AsyncClient(timeout=_TIMEOUT, follow_redirects=True) as client:
+        for endpoint_tpl in _GUARDAHD_ENDPOINTS:
+            path = endpoint_tpl.format(imdb_id=imdb_id)
+            url = f"{GUARDAHD_BASE}{path}"
+            try:
+                resp = await client.get(url, headers=_HEADERS)
+                if not resp.ok:
+                    logger.warning(f"[GuardaHD] HTTP {resp.status_code} per {url}")
+                    continue
 
-        links: set = set()
+                links = _parse_links_from_html(resp.text)
+                if links:
+                    logger.info(f"[GuardaHD] {len(links)} link trovati via {path}")
+                    return links
+                else:
+                    logger.debug(f"[GuardaHD] nessun link in {path}, provo endpoint alternativo")
 
-        # iframe src
-        for m in re.finditer(r'<iframe[^>]+src=["\'](https?://[^"\']+)["\']', html, re.IGNORECASE):
-            links.add(m.group(1))
+            except Exception as e:
+                logger.warning(f"[GuardaHD] fetch error per {url}: {e}")
+                continue
 
-        # data-link
-        for m in re.finditer(r'data-link=["\'](https?://[^"\']+)["\']', html):
-            links.add(m.group(1))
-
-        # URL diretti noti
-        direct_re = re.compile(
-            r'https?://(?:www\.)?(?:mixdrop|m1xdrop|dhcplay|vibuxer|loadm|uqload)[\w./-]+',
-            re.IGNORECASE,
-        )
-        for m in direct_re.finditer(html):
-            links.add(m.group(0))
-
-        return list(links)
-    except Exception as e:
-        logger.error(f"[GuardaHD] fetch error: {e}")
-        return []
+    logger.warning(f"[GuardaHD] nessun link trovato per {imdb_id} su nessun endpoint")
+    return []
 
 
 # ---------------------------------------------------------------------------
@@ -188,7 +217,7 @@ async def resolve_guardahd(
 ) -> List[Dict]:
     """
     Restituisce una lista di stream Stremio da GuardaHD.
-    Viene usato come fallback quando VixSrc non ha il contenuto.
+    Lanciato in parallelo con VixCloud e VidXgo — non è un fallback.
     Solo film (content_type == "movie").
     """
     if not GUARDAHD_ENABLED:
@@ -203,18 +232,17 @@ async def resolve_guardahd(
         logger.info(f"[GuardaHD] skip — IMDB ID mancante: {imdb_id!r}")
         return []
 
-    logger.info(f"[GuardaHD] cerco stream per {imdb_id} ({content_label})")
+    logger.info(f"[GuardaHD] 🎬 cerco stream per {imdb_id} ({content_label})")
 
     links = await _fetch_guardahd_links(imdb_id)
     if not links:
-        logger.warning(f"[GuardaHD] nessun link trovato per {imdb_id}")
+        logger.warning(f"[GuardaHD] ❌ nessun link trovato per {imdb_id}")
         return []
 
     streams: List[Dict] = []
     seen_urls: set = set()
 
     async with httpx.AsyncClient(timeout=_TIMEOUT, follow_redirects=True) as client:
-        tasks = []
 
         async def _process(link: str):
             stream_url: Optional[str] = None
@@ -238,7 +266,7 @@ async def resolve_guardahd(
             if stream_url and stream_url not in seen_urls:
                 seen_urls.add(stream_url)
                 streams.append({
-                    "name": f"UFO\n🇮🇹 GuardaHD",
+                    "name": "UFO\n🇮🇹 GuardaHD",
                     "title": f"{content_label}\n[{host_label}]",
                     "url": stream_url,
                     "behaviorHints": {
@@ -247,12 +275,16 @@ async def resolve_guardahd(
                     },
                 })
                 logger.info(f"[GuardaHD] ✅ stream trovato via {host_label}: {stream_url[:80]}")
+            elif stream_url:
+                logger.debug(f"[GuardaHD] stream duplicato ignorato: {stream_url[:60]}")
+            else:
+                logger.debug(f"[GuardaHD] nessun stream estratto da: {link}")
 
         await asyncio.gather(*[_process(link) for link in links])
 
     if not streams:
-        logger.warning(f"[GuardaHD] nessun stream estratto per {imdb_id}")
+        logger.warning(f"[GuardaHD] ❌ nessun stream estratto per {imdb_id} (link trovati: {len(links)})")
     else:
-        logger.info(f"[GuardaHD] {len(streams)} stream trovati per {imdb_id}")
+        logger.info(f"[GuardaHD] ✅ {len(streams)} stream trovati per {imdb_id}")
 
     return streams
