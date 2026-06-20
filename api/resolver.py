@@ -1,5 +1,5 @@
 """
-resolver.py — estrazione M3U8 da VixSrc/VixCloud + VidXgo.
+resolver.py — estrazione M3U8 da VixSrc/VixCloud + VidXgo + GuardaHD.
 
 Flusso per VixSrc/VixCloud (invariato):
   1. GET /api/tv/<tmdb>/<s>/<e> oppure /api/movie/<tmdb>
@@ -8,11 +8,17 @@ Flusso per VixSrc/VixCloud (invariato):
   4. Costruisci URL HLS con token, expires, [h=1 se canPlayFHD]
   5. Verifica HEAD su VixSrc (skip con VIXSRC_SKIP_LIST_CHECK=1)
 
-Flusso per VidXgo (nuovo):
+Flusso per VidXgo (invariato):
   - Richiede IMDB ID (risolto da TMDB)
   - Costruisce {VIDXGO_DOMAIN}/{imdb_id}[/{s}/{e}]
   - Passa l'URL al proxy HLS interno (come VixCloud)
   - Entrambe le fonti vengono lanciate in parallelo con asyncio.gather()
+
+Flusso per GuardaHD (nuovo — solo film):
+  - Usato come fallback quando VixSrc non trova il contenuto (API 404 o nessun embed)
+  - Chiama guardahd.stream/set-movie-a/{imdb_id}
+  - Estrae iframe MixDrop / StreamHG e li risolve in .m3u8
+  - GUARDAHD_ENABLED=0 per disabilitarlo
 
 I segmenti HLS vengono proxiati dal proxy interno (proxy.py).
 """
@@ -33,6 +39,7 @@ from .config import SC_DOMAIN, USER_AGENT
 from .proxy import encode_headers_b64
 from .tmdb import get_tmdb_info, get_episode_title
 from .vidxgo import resolve_vidxgo
+from .guardahd import resolve_guardahd
 
 logger = logging.getLogger(__name__)
 
@@ -412,7 +419,8 @@ async def get_streams(
       content_type    "movie" | "series"
       addon_base_url  base URL dell'addon per costruire URL proxy interno
 
-    Lancia VixCloud e VidXgo in parallelo; restituisce tutti gli stream validi.
+    Lancia VixCloud, VidXgo e (se film fallisce VixSrc) GuardaHD in parallelo;
+    restituisce tutti gli stream validi.
     """
     result: Dict = {"streams": []}
     try:
@@ -469,6 +477,17 @@ async def get_streams(
                 logger.error(f"❌ Provider exception: {stream}")
             elif isinstance(stream, dict):
                 result["streams"].append(stream)
+
+        # --- GuardaHD: fallback se VixCloud non ha trovato nulla (solo film) ---
+        if content_type == "movie" and vixcloud_stream is None and imdb_id:
+            logger.info(f"[GuardaHD] VixSrc senza risultati — provo GuardaHD per {imdb_id}")
+            try:
+                guardahd_streams = await resolve_guardahd(
+                    imdb_id, content_label, content_type, addon_base_url
+                )
+                result["streams"].extend(guardahd_streams)
+            except Exception as e:
+                logger.error(f"❌ GuardaHD fallback error: {e}")
 
     except Exception as e:
         logger.error(f"❌ get_streams error: {e}")
