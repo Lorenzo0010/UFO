@@ -89,9 +89,9 @@ def _extract_packed_stream(html: str) -> Optional[str]:
     try:
         p, a, c, k = m.group(1), int(m.group(2)), int(m.group(3)), m.group(4).split("|")
         unpacked = _unpack(p, a, c, k)
-        wurl = re.search(r'wurl\s*=\s*["\'](https?://[^"\']+)["\']', unpacked)
+        wurl = re.search(r'wurl\s*=\s*["\']( https?://[^"\']+)["\']', unpacked)
         if wurl:
-            url = wurl.group(1)
+            url = wurl.group(1).strip()
             return ("https:" + url) if url.startswith("//") else url
         # fallback: cerca direttamente un .m3u8 nell'unpacked
         m3u8 = re.search(r'(https?://[^\s"\']+\.m3u8[^\s"\']*)', unpacked)
@@ -108,7 +108,7 @@ async def _extract_mixdrop(url: str, client: httpx.AsyncClient) -> Optional[str]
         if url.startswith("//"):
             url = "https:" + url
         resp = await client.get(url, headers={**_HEADERS, "Referer": "https://mixdrop.sb/"})
-        if not resp.ok:
+        if not resp.is_success:
             logger.debug(f"[GuardaHD] MixDrop HTTP {resp.status_code} per {url}")
             return None
         html = resp.text
@@ -116,11 +116,11 @@ async def _extract_mixdrop(url: str, client: httpx.AsyncClient) -> Optional[str]
         if stream:
             return stream
         # fallback: cerca iframe /e/
-        iframe = re.search(r'<iframe[^>]+src=["\'](/e/[^"\']+)["\']', html)
+        iframe = re.search(r'<iframe[^>]+src=["\']( /e/[^"\']+)["\']', html)
         if iframe:
-            embed_url = url.split("/f/")[0].rstrip("/") + iframe.group(1)
+            embed_url = url.split("/f/")[0].rstrip("/") + iframe.group(1).strip()
             resp2 = await client.get(embed_url, headers={**_HEADERS, "Referer": url})
-            if resp2.ok:
+            if resp2.is_success:
                 return _extract_packed_stream(resp2.text)
     except Exception as e:
         logger.debug(f"[GuardaHD] MixDrop error: {e}")
@@ -137,7 +137,7 @@ async def _extract_streamhg(url: str, client: httpx.AsyncClient) -> Optional[str
             headers={**_HEADERS, "Referer": url},
             follow_redirects=True,
         )
-        if not resp.ok:
+        if not resp.is_success:
             logger.debug(f"[GuardaHD] StreamHG HTTP {resp.status_code} per {url}")
             return None
         stream = _extract_packed_stream(resp.text)
@@ -157,12 +157,12 @@ def _parse_links_from_html(html: str) -> List[str]:
     links: set = set()
 
     # iframe src
-    for m in re.finditer(r'<iframe[^>]+src=["\'](https?://[^"\']+)["\']', html, re.IGNORECASE):
-        links.add(m.group(1))
+    for m in re.finditer(r'<iframe[^>]+src=["\']( https?://[^"\']+)["\']', html, re.IGNORECASE):
+        links.add(m.group(1).strip())
 
     # data-link
-    for m in re.finditer(r'data-link=["\'](https?://[^"\']+)["\']', html):
-        links.add(m.group(1))
+    for m in re.finditer(r'data-link=["\']( https?://[^"\']+)["\']', html):
+        links.add(m.group(1).strip())
 
     # URL diretti noti
     direct_re = re.compile(
@@ -186,7 +186,7 @@ async def _fetch_guardahd_links(imdb_id: str) -> List[str]:
             url = f"{GUARDAHD_BASE}{path}"
             try:
                 resp = await client.get(url, headers=_HEADERS)
-                if not resp.ok:
+                if not resp.is_success:
                     logger.warning(f"[GuardaHD] HTTP {resp.status_code} per {url}")
                     continue
 
