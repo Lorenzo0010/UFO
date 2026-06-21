@@ -1,6 +1,6 @@
 # 🛸 UFO — Stremio Addon
 
-> Addon Stremio che fornisce stream HLS da **VixSrc** tramite **EasyProxy**.
+> Addon Stremio che fornisce stream HLS da **VixSrc**, **VidXgo** e **GuardaHD** tramite un **proxy HLS interno**.
 > Supporta il deploy su [Koyeb](https://koyeb.com) e tramite Docker.
 
 ---
@@ -14,7 +14,7 @@ Utilizzando questo progetto, l'utente accetta di assumersi la piena responsabili
 
 - Questo addon **non ospita, non distribuisce e non indicizza** alcun contenuto multimediale
 - Funziona esclusivamente come **proxy di reindirizzamento** verso sorgenti di terze parti pubblicamente accessibili
-- L'autore **non ha alcun controllo** sui contenuti forniti da sorgenti esterne (VixSrc, EasyProxy, TMDB)
+- L'autore **non ha alcun controllo** sui contenuti forniti da sorgenti esterne (VixSrc, VidXgo, GuardaHD, TMDB)
 - L'autore **non garantisce** la disponibilità, la legalità o la qualità dei contenuti raggiungibili tramite questo software
 - È responsabilità dell'utente verificare che l'utilizzo di questo software sia conforme alle leggi del proprio paese
 
@@ -29,17 +29,15 @@ Questo progetto nasce come studio pratico dei seguenti argomenti:
 - Sviluppo di API REST con **FastAPI** e Python asincrono
 - Integrazione con API di terze parti (**TMDB API**)
 - Architettura di addon per **Stremio** e il relativo protocollo
-- Utilizzo di **EasyProxy** per la gestione di stream HLS
+- Proxy HLS interno (riscrittura manifest `.m3u8` e inoltro segmenti)
 - Deploy su piattaforma cloud moderna (**Koyeb**) e tramite **Docker**
 - Strutturazione di progetti Python in moduli riutilizzabili
-
-Il codice è intenzionalmente documentato e organizzato per essere comprensibile e riutilizzabile come riferimento didattico.
 
 ---
 
 ## Come funziona
 
-UFO fa da ponte tra Stremio e VixSrc. Il sistema usa **EasyProxy** per aggirare il blocco degli IP datacenter:
+UFO aggrega stream da tre provider in parallelo tramite un **proxy HLS interno** che riscrive i manifest e inoltra i segmenti video.
 
 ```
 Stremio
@@ -48,27 +46,41 @@ Stremio
   ▼
 api/index.py  ──►  api/resolver.py
                         │
-                        │  1. Risolve IMDb ID → TMDB ID  (via api/tmdb.py + cache)
-                        │  2. Costruisce URL pagina VixSrc
-                        │  3. Passa la pagina VixSrc a EasyProxy (?d=<vixsrc_page>)
-                        ▼
-                     EasyProxy
-                        │  scraping + fetch manifest HLS
-                        ▼
-                  manifest .m3u8 ◄──── Stremio riproduce
+                        │  asyncio.gather() ────────────────────────────────────┐
+                        │                                                        │
+                        ├── 1. VixSrc/VixCloud ───────────────────────────────┐ │
+                        │      a. Risolve IMDb → TMDB  (tmdb.py + cache)      │ │
+                        │      b. Chiama /api/movie|tv/<tmdb>                  │ │
+                        │      c. Estrae URL embed VixCloud                    │ │
+                        │      d. Estrae token/expires/m3u8 dallo script       │ │
+                        │      e. HEAD check disponibilità (opzionale)         │ │
+                        │                                                       │ │
+                        ├── 2. VidXgo ─────────────────────────────────────── │ │
+                        │      a. Risolve IMDb → IMDb (usa ID diretto)         │ │
+                        │      b. Costruisce {VIDXGO_DOMAIN}/{imdb}[/s/e]      │ │
+                        │      c. Estrae m3u8 tramite proxy interno             │ │
+                        │                                                       │ │
+                        └── 3. GuardaHD (solo film) ──────────────────────── ─┘ │
+                               a. Chiama /set-movie-a/{imdb_id}                  │
+                               b. Estrae iframe MixDrop / StreamHG               │
+                               c. Risolve in .m3u8                               │
+                                                                                  │
+                   ┌──────────────────────────────────────────────────────────────┘
+                   ▼
+           api/proxy.py  ──►  /proxy/manifest.m3u8?url=<encoded>
+                               Riscrive URI nel manifest e inoltra segmenti
+                               Stremio riproduce
 ```
 
-### Flusso dettagliato
+### Proxy HLS interno
 
-1. **Stremio** invia una richiesta all'addon con l'ID del contenuto (IMDb `tt…` o TMDB numerico) e il tipo (`movie` / `series`)
-2. **`resolver.py`** divide l'ID in parti: `content_id`, `season`, `episode` (per le serie)
-3. **`tmdb.py`** controlla la **cache in-memory** — se l'ID è già stato risolto, risponde senza chiamare TMDB; altrimenti chiama l'endpoint `/find` e salva il risultato
-4. Viene costruita la **URL della pagina VixSrc** nel formato:
-   - Film: `https://vixsrc.to/movie/{tmdb_id}/`
-   - Serie: `https://vixsrc.to/tv/{tmdb_id}/{season}/{episode}/`
-5. La pagina VixSrc viene passata come `?d=` a **EasyProxy**, che restituisce il manifest HLS
+Il proxy (`api/proxy.py`) agisce da intermediario tra Stremio e le sorgenti HLS:
 
-> ⚠️ `EASYPROXY_URL` deve essere configurato. Senza di esso, VixSrc blocca le richieste provenienti da IP di datacenter (es. Koyeb).
+1. `GET /proxy/manifest.m3u8?url=<encoded>` — scarica il manifest e riscrive tutti gli URI (segmenti, chiavi, sotto-playlist) come URL proxy
+2. `GET /proxy/segment?url=<encoded>` — rileva automaticamente se la risposta è un sotto-manifesto (anche senza `.m3u8` nell'URL) e lo riscrive, altrimenti inoltra il segmento direttamente
+3. Gli header originali (Referer, User-Agent, ecc.) vengono propagati in ogni richiesta tramite `headers_b64`
+
+> Per ambienti multi-client (es. Stremio desktop + GuardaHD sullo stesso server), impostare **`ADDON_BASE_URL`** con l'URL pubblico del servizio; altrimenti viene usato `request.base_url` come fallback (funziona solo per client con lo stesso IP).
 
 ---
 
@@ -81,36 +93,38 @@ UFO/
 │   ├── index.py          # Entry point: app FastAPI, lifespan, route
 │   ├── config.py         # Env vars e validate_config()
 │   ├── tmdb.py           # Risoluzione IMDb → TMDB con cache in-memory e sessione condivisa
-│   └── resolver.py       # Costruzione URL EasyProxy e restituzione stream
+│   ├── resolver.py       # Orchestrazione provider (VixSrc, VidXgo, GuardaHD)
+│   ├── vidxgo.py         # Provider VidXgo
+│   ├── guardahd.py       # Provider GuardaHD (solo film)
+│   └── proxy.py          # Proxy HLS interno (manifest + segmenti)
 ├── Dockerfile            # Immagine Docker per deploy su VPS/Orange Pi/qualsiasi host
 ├── Procfile              # Avvio per Koyeb: uvicorn api.index:app --port 8000
 ├── requirements.txt      # Dipendenze con versioni pinnate
 └── README.md
 ```
 
-### Descrizione file
+### Descrizione moduli
 
 #### `api/config.py`
-Centralizza tutta la configurazione. Le variabili sensibili (`TMDB_KEY`, `EASYPROXY_URL`) non hanno valori di default.
-
-```python
-SC_DOMAIN    = os.getenv("SC_DOMAIN", "https://vixsrc.to")
-TMDB_API_KEY = os.getenv("TMDB_KEY", "")        # ⚠️ Obbligatoria — impostare via env var
-USER_AGENT   = os.getenv("USER_AGENT", "Mozilla/5.0 ...")
-EASYPROXY_URL = os.getenv("EASYPROXY_URL", "").rstrip("/")
-EASYPROXY_PSW = os.getenv("EASYPROXY_PASSWORD", "")
-```
-
-> ⚠️ Non inserire mai `TMDB_KEY` direttamente nel codice.
+Centralizza tutta la configurazione. Le variabili sensibili (`TMDB_KEY`) non hanno valori di default. `validate_config()` viene chiamata al lifespan di FastAPI e logga warning per ogni variabile obbligatoria mancante, oltre a info sullo stato delle variabili opzionali.
 
 #### `api/tmdb.py`
 Risolve IMDb ID → TMDB ID con **cache in-memory** e **sessione HTTP condivisa** (`AsyncSession` creata una volta sola e riutilizzata). La cache evita chiamate duplicate per lo stesso contenuto durante la sessione.
 
 #### `api/resolver.py`
-Costruisce l'URL EasyProxy e restituisce lo stream a Stremio.
+Orchestratore principale. Lancia i tre provider in parallelo con `asyncio.gather()` e aggrega tutti gli stream validi nel risultato restituito a Stremio.
+
+#### `api/vidxgo.py`
+Provider VidXgo. Usa l'IMDb ID direttamente (non richiede TMDB). Se `EASYPROXY_URL` è impostata, usa EasyProxy per VidXgo; altrimenti usa il proxy HLS interno (senza token rotation).
+
+#### `api/guardahd.py`
+Provider GuardaHD, attivo **solo per i film**. Viene eseguito sempre in parallelo con gli altri provider (non è un fallback). Può essere disabilitato con `GUARDAHD_ENABLED=0`.
+
+#### `api/proxy.py`
+Proxy HLS interno. Espone due route (`/proxy/manifest.m3u8` e `/proxy/segment`) e riscrive ogni URI nei manifest per passare per il proxy stesso, propagando gli header originali.
 
 #### `api/index.py`
-Entry point FastAPI. Il `lifespan` esegue `validate_config()` all'avvio e chiude la sessione HTTP allo shutdown.
+Entry point FastAPI. Il `lifespan` esegue `validate_config()` all'avvio e chiude le sessioni HTTP allo shutdown.
 
 | Route | Funzione |
 |---|---|
@@ -119,6 +133,8 @@ Entry point FastAPI. Il `lifespan` esegue `validate_config()` all'avvio e chiude
 | `GET /stream/{type}/{id}.json` | **Route principale** |
 | `GET /meta/{type}/{id}.json` | Metadati stub |
 | `GET /catalog/{type}/{id}.json` | Catalogo vuoto |
+| `GET /proxy/manifest.m3u8` | Proxy HLS — manifest |
+| `GET /proxy/segment` | Proxy HLS — segmenti |
 
 #### `Dockerfile`
 Immagine basata su `python:3.12-slim`. Copia prima `requirements.txt` per sfruttare la cache layer di Docker, poi il codice sorgente. Porta esposta: `8000`.
@@ -133,6 +149,7 @@ web: uvicorn api.index:app --host 0.0.0.0 --port 8000
 |---|---|---|
 | `fastapi` | 0.115.12 | Framework web REST |
 | `uvicorn` | 0.34.0 | Server ASGI |
+| `httpx` | — | Client HTTP asincrono |
 | `curl_cffi` | 0.14.0 | Client HTTP con fingerprint browser |
 | `python-dotenv` | 1.1.0 | Caricamento `.env` in locale |
 | `beautifulsoup4` | 4.13.4 | Parsing HTML |
@@ -140,11 +157,52 @@ web: uvicorn api.index:app --host 0.0.0.0 --port 8000
 
 ---
 
+## 🔧 Variabili d'ambiente
+
+### Obbligatorie
+
+| Variabile | Descrizione |
+|---|---|
+| `TMDB_KEY` | API key TMDB personale (gratuita su [themoviedb.org](https://www.themoviedb.org/settings/api)) |
+
+### Consigliate
+
+| Variabile | Default | Descrizione |
+|---|---|---|
+| `ADDON_BASE_URL` | *(vuoto)* | URL pubblico fisso del servizio (es. `https://mio-addon.koyeb.app`). **Necessario** per ambienti multi-client (GuardaHD, Stremio desktop + mobile sullo stesso server). Se non impostato, viene usato `request.base_url` come fallback (funziona solo se tutti i client hanno lo stesso IP). |
+
+### Provider
+
+| Variabile | Default | Descrizione |
+|---|---|---|
+| `SC_DOMAIN` | `https://vixsrc.to` | Dominio VixSrc alternativo |
+| `VIDXGO_DOMAIN` | `https://v.vidxgo.co` | Dominio VidXgo alternativo |
+| `VIDXGO_ENABLED` | `1` | Abilita il provider VidXgo. Impostare `0` per disabilitarlo |
+| `GUARDAHD_ENABLED` | `1` | Abilita il provider GuardaHD (solo film). Impostare `0` per disabilitarlo |
+| `VIXSRC_SKIP_LIST_CHECK` | *(vuoto)* | Se `1`, salta il controllo HEAD sulla disponibilità del contenuto VixSrc. Utile se VixSrc blocca le richieste HEAD dall'IP del server |
+
+### EasyProxy (opzionale — solo per VidXgo)
+
+EasyProxy è stato rimosso dal flusso principale VixSrc. Rimane utilizzabile **solo per VidXgo**: se `EASYPROXY_URL` è impostata, VidXgo usa EasyProxy (con token rotation); altrimenti usa il proxy HLS interno (senza token rotation).
+
+| Variabile | Default | Descrizione |
+|---|---|---|
+| `EASYPROXY_URL` | *(vuoto)* | URL base EasyProxy (es. `https://myproxy.koyeb.app`). Opzionale, usato solo da VidXgo |
+| `EASYPROXY_PASSWORD` | *(vuoto)* | Password EasyProxy |
+
+### HTTP
+
+| Variabile | Default | Descrizione |
+|---|---|---|
+| `USER_AGENT` | `Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:131.0)…` | User-Agent HTTP personalizzato per le richieste verso i provider |
+
+---
+
 ## Prerequisiti
 
-- Un'istanza **EasyProxy** raggiungibile pubblicamente
 - Una **TMDB API Key** personale (gratuita su [themoviedb.org](https://www.themoviedb.org/settings/api))
 - **Docker** (opzionale, per deploy non-Koyeb)
+- Un'istanza **EasyProxy** raggiungibile pubblicamente (opzionale, solo per VidXgo con token rotation)
 
 ---
 
@@ -169,12 +227,14 @@ Koyeb legge automaticamente il `Procfile`.
 | Variabile | Obbligatoria | Descrizione |
 |---|---|---|
 | `TMDB_KEY` | ✅ Sì | API key TMDB personale |
-| `EASYPROXY_URL` | ✅ Sì | URL base EasyProxy (es. `https://myproxy.koyeb.app`) |
-| `EASYPROXY_PASSWORD` | ❌ Facoltativa | Password EasyProxy |
-| `SC_DOMAIN` | ❌ Facoltativa | Dominio VixSrc alternativo (default: `https://vixsrc.to`) |
-| `USER_AGENT` | ❌ Facoltativa | User-Agent HTTP personalizzato |
-
-> All'avvio `validate_config()` logga un `⚠️ warning` per ogni variabile obbligatoria mancante.
+| `ADDON_BASE_URL` | ⚠️ Consigliata | URL pubblico del servizio Koyeb (es. `https://mio-addon.koyeb.app`) |
+| `VIDXGO_ENABLED` | ❌ No | `0` per disabilitare VidXgo (default: abilitato) |
+| `GUARDAHD_ENABLED` | ❌ No | `0` per disabilitare GuardaHD (default: abilitato) |
+| `VIXSRC_SKIP_LIST_CHECK` | ❌ No | `1` per saltare il controllo HEAD di VixSrc |
+| `EASYPROXY_URL` | ❌ No | URL EasyProxy (solo per VidXgo con token rotation) |
+| `EASYPROXY_PASSWORD` | ❌ No | Password EasyProxy |
+| `SC_DOMAIN` | ❌ No | Dominio VixSrc alternativo |
+| `USER_AGENT` | ❌ No | User-Agent HTTP personalizzato |
 
 ### 4. Deploy
 
@@ -192,13 +252,28 @@ docker build -t ufo-addon .
 docker run -d \
   -p 8000:8000 \
   -e TMDB_KEY=la_tua_api_key \
-  -e EASYPROXY_URL=https://myproxy.example.com \
-  -e EASYPROXY_PASSWORD=password_opzionale \
+  -e ADDON_BASE_URL=http://192.168.1.77:8000 \
   --name ufo \
   ufo-addon
 ```
 
 Funziona su qualsiasi host con Docker: VPS, Orange Pi, Raspberry Pi, macchina locale.
+
+**Con tutte le opzioni:**
+
+```bash
+docker run -d \
+  -p 8000:8000 \
+  -e TMDB_KEY=la_tua_api_key \
+  -e ADDON_BASE_URL=http://192.168.1.77:8000 \
+  -e VIDXGO_ENABLED=1 \
+  -e GUARDAHD_ENABLED=1 \
+  -e VIXSRC_SKIP_LIST_CHECK=0 \
+  -e EASYPROXY_URL=https://myproxy.example.com \
+  -e EASYPROXY_PASSWORD=password_opzionale \
+  --name ufo \
+  ufo-addon
+```
 
 ---
 
@@ -210,7 +285,7 @@ Apri nel browser l'URL del servizio. La risposta mostrerà il link al manifest:
 {
   "status": "online",
   "addon": "UFO addon",
-  "easyproxy": true,
+  "proxy": "internal",
   "manifest": "https://<tuo-servizio>/manifest.json"
 }
 ```
@@ -226,7 +301,7 @@ Incolla il link manifest in Stremio → **Addon** → **Aggiungi addon tramite U
 pip install -r requirements.txt
 
 # Crea il file .env
-# (copia l'esempio qui sotto)
+cp .env.example .env  # oppure crea manualmente
 
 # Avvia il server
 uvicorn api.index:app --reload --port 8000
@@ -235,11 +310,20 @@ uvicorn api.index:app --reload --port 8000
 **Esempio `.env`:**
 ```env
 TMDB_KEY=la_tua_api_key_tmdb
-EASYPROXY_URL=https://myproxy.example.com
-EASYPROXY_PASSWORD=password_opzionale
+ADDON_BASE_URL=http://localhost:8000
 
-# Opzionali
+# Provider (opzionali — tutti abilitati di default)
+# VIDXGO_ENABLED=1
+# GUARDAHD_ENABLED=1
+# VIXSRC_SKIP_LIST_CHECK=0
+
+# EasyProxy (opzionale — solo per VidXgo)
+# EASYPROXY_URL=https://myproxy.example.com
+# EASYPROXY_PASSWORD=
+
+# Avanzate
 # SC_DOMAIN=https://vixsrc.to
+# VIDXGO_DOMAIN=https://v.vidxgo.co
 # USER_AGENT=Mozilla/5.0 ...
 ```
 
@@ -251,9 +335,11 @@ EASYPROXY_PASSWORD=password_opzionale
 |---|---|---|
 | `GET` | `/` | Status e link al manifest |
 | `GET` | `/manifest.json` | Manifest Stremio |
-| `GET` | `/stream/{type}/{id}.json` | Risoluzione stream |
+| `GET` | `/stream/{type}/{id}.json` | Risoluzione stream (tutti i provider) |
 | `GET` | `/meta/{type}/{id}.json` | Metadati (stub) |
 | `GET` | `/catalog/{type}/{id}.json` | Catalogo (vuoto) |
+| `GET` | `/proxy/manifest.m3u8` | Proxy HLS — manifest |
+| `GET` | `/proxy/segment` | Proxy HLS — segmenti |
 
 ---
 
@@ -268,6 +354,17 @@ L'autore non è responsabile per danni derivanti dall'uso di questo software.
 
 ## 📋 Changelog
 
+### [1.6.0] — 2026-06
+> Proxy HLS interno, VidXgo, GuardaHD
+
+- **feat**: proxy HLS interno (`api/proxy.py`) — riscrive manifest e inoltra segmenti; EasyProxy non è più necessario per VixSrc
+- **feat**: aggiunto provider **VidXgo** (`api/vidxgo.py`) — usa IMDb ID diretto; supporta sia EasyProxy sia proxy interno
+- **feat**: aggiunto provider **GuardaHD** (`api/guardahd.py`) — solo film; estrattore MixDrop/StreamHG; disabilitabile con `GUARDAHD_ENABLED=0`
+- **feat**: tutti i provider vengono eseguiti in parallelo con `asyncio.gather()`; tutti gli stream validi vengono restituiti insieme
+- **feat**: aggiunta variabile `ADDON_BASE_URL` per ambienti multi-client
+- **feat**: aggiunta variabile `VIXSRC_SKIP_LIST_CHECK` per saltare il controllo HEAD di VixSrc
+- **fix**: `EASYPROXY_URL` mantenuta per retrocompatibilità VidXgo, ma non più usata da VixSrc
+
 ### [1.5.0] — 2026-04-13
 > Rimozione ADDON_PATH
 
@@ -278,59 +375,11 @@ L'autore non è responsabile per danni derivanti dall'uso di questo software.
 ### [1.4.1] — 2026-04-13
 > Porta aggiornata a 8000 per compatibilità Koyeb
 
-- **fix**: porta aggiornata da `8080` a `8000` in README, `Procfile` description, `Dockerfile` description e negli esempi Docker/sviluppo locale
+- **fix**: porta aggiornata da `8080` a `8000` in README, `Procfile`, `Dockerfile` e negli esempi Docker/sviluppo locale
 
 ### [1.4.0] — 2026-04-13
 > Sicurezza, performance e infrastruttura
 
-- **security**: rimosso il valore di fallback hardcodato della TMDB API key — la variabile `TMDB_KEY` è ora obbligatoria; `validate_config()` logga un warning all'avvio se mancante
-- **perf**: aggiunta cache in-memory per le risoluzioni IMDb → TMDB; aggiunta sessione HTTP condivisa (`AsyncSession`) creata una sola volta e chiusa nel `lifespan`
-- **feat**: `ADDON_PATH` configurabile via env var (default `U0MQ`); versione nel manifest leggibile da `config.py`
-- **chore**: dipendenze pinnate a versioni specifiche in `requirements.txt`; aggiunto `Dockerfile` basato su `python:3.12-slim`
-- **docs**: README aggiornato
-
-### [1.3.0] — 2026-04-13
-> Consolidamento su EasyProxy + Koyeb
-
-- **feat**: adottato **EasyProxy** come unico proxy per gli stream HLS (`EASYPROXY_URL` + `EASYPROXY_PASSWORD`)
-- **config**: aggiunta variabile `EASYPROXY_URL`; rimossi tutti i riferimenti a MediaFlow
-- **chore**: rimosso `vercel.json` — deploy migrato definitivamente su **Koyeb**
-- **revert**: rimosso `proxy.py` integrato accidentalmente nel branch `main` (appartiene a `integrated-easyproxy`)
-- **docs**: README aggiornato — solo Koyeb e EasyProxy, rimossi i riferimenti a MediaFlow e Vercel
-
-### [1.2.0] — 2026-04-12
-> Refactor proxy: solo stream diretto, poi EasyProxy
-
-- **refactor**: rimossi EasyProxy e MediaFlow — lo stream veniva restituito direttamente a Stremio (PR #1 dal branch `test`)
-- **revert**: ripristinata la versione funzionante con solo EasyProxy dopo i test falliti con lo stream diretto
-
-### [1.1.0] — 2026-04-11
-> Dual-proxy, HLS multi-step e ridenominazione
-
-- **feat**: supporto dual-proxy — **EasyProxy** prioritario + **MediaFlow** come fallback con estrazione HLS multi-step da VixSrc
-- **feat**: aggiunto `vercel.json` per deploy su Vercel con MediaFlow via env vars
-- **feat**: proxy URL configurabile via pagina web (form HTML) invece di env var hardcodata
-- **fix**: sostituito `httpx` con `curl_cffi` per aggirare i blocchi anti-bot di VixSrc; corretta l'estrazione del manifest e il builder MediaFlow
-- **fix**: disabilitata la cache degli stream di Stremio per evitare token VixSrc scaduti
-- **fix**: CORS credentials conflict; token encoding robusto; `vercel.json` con header CORS
-- **fix**: import assoluti + `mangum` handler per compatibilità Vercel serverless
-- **fix**: HTML spostato in file statico per evitare conflitti con `str.format()` e regex `{N}`
-- **chore**: addon rinominato in **UFO 🇮🇹**, stream title rinominato da `VixSrc` a `Vix 🇮🇹`
-- **feat**: stream name e title arricchiti con titolo del contenuto e stagione/episodio
-
-### [1.0.0] — 2026-04-10
-> Prima versione stabile — refactor modulare
-
-- **refactor**: `index.py` monolitico suddiviso in moduli: `index.py`, `config.py`, `tmdb.py`, `resolver.py`
-- **feat**: proxy HLS integrato per aggirare il blocco IP datacenter (sostituisce temporaneamente MediaFlow); supporto `HEAD`, `EXT-X-KEY`, `EXT-X-MAP`, segmenti `.ts`/`.m4s`
-- **fix**: risoluzione M3U8 master playlist e base URL per i segmenti `.ts`
-- **chore**: rimosso `railway.json`; migrazione deploy da Railway a Koyeb; aggiunto `Procfile`
-- **docs**: aggiunto `README.md` con struttura del progetto, flusso dettagliato e istruzioni deploy; aggiunti disclaimer e note legali; aggiunto file `LICENSE` (MIT)
-
-### [0.1.0] — 2026-04-09
-> Proof of concept iniziale
-
-- **feat**: primo addon Stremio funzionante con FastAPI; risoluzione IMDb → TMDB ID tramite API TMDB; estrazione stream HLS da VixSrc con `curl_cffi` (impersonation Chrome)
-- **feat**: proxy HLS per `/playlist/` — riscrittura manifest M3U8 (URI segmenti, `EXT-X-KEY`, `EXT-X-MAP`); proxy `AES-128` encryption key
-- **fix**: cache disabilitata su tutte le route per evitare stream scaduti; regex precisa per `window.masterPlaylist`; supporto apici doppi e singoli
-- **chore**: aggiunto `Procfile` e configurazione Railway per il primo deploy cloud
+- **security**: rimosso il valore di fallback hardcodato della TMDB API key — la variabile `TMDB_KEY` è ora obbligatoria
+- **perf**: aggiunta cache in-memory per le risoluzioni IMDb → TMDB; aggiunta sessione HTTP condivisa
+- **chore**: dipendenze pinnate in `requirements.txt`; aggiunto `Dockerfile`
