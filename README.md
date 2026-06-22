@@ -1,6 +1,6 @@
 # 🛸 UFO — Stremio Addon
 
-> Addon Stremio che fornisce stream HLS da **VixSrc**, **VidXgo** e **GuardaHD** tramite un **proxy HLS interno**.
+> Addon Stremio che fornisce stream HLS da **VixSrc/VixCloud** e **VidXgo** tramite un **proxy HLS interno**.
 > Supporta il deploy su [Koyeb](https://koyeb.com) e tramite Docker.
 
 ---
@@ -14,7 +14,7 @@ Utilizzando questo progetto, l'utente accetta di assumersi la piena responsabili
 
 - Questo addon **non ospita, non distribuisce e non indicizza** alcun contenuto multimediale
 - Funziona esclusivamente come **proxy di reindirizzamento** verso sorgenti di terze parti pubblicamente accessibili
-- L'autore **non ha alcun controllo** sui contenuti forniti da sorgenti esterne (VixSrc, VidXgo, GuardaHD, TMDB)
+- L'autore **non ha alcun controllo** sui contenuti forniti da sorgenti esterne (VixSrc, VidXgo, TMDB)
 - L'autore **non garantisce** la disponibilità, la legalità o la qualità dei contenuti raggiungibili tramite questo software
 - È responsabilità dell'utente verificare che l'utilizzo di questo software sia conforme alle leggi del proprio paese
 
@@ -37,7 +37,7 @@ Questo progetto nasce come studio pratico dei seguenti argomenti:
 
 ## Come funziona
 
-UFO aggrega stream da tre provider in parallelo tramite un **proxy HLS interno** che riscrive i manifest e inoltra i segmenti video.
+UFO aggrega stream da due provider in parallelo tramite un **proxy HLS interno** che riscrive i manifest e inoltra i segmenti video.
 
 ```
 Stremio
@@ -46,29 +46,26 @@ Stremio
   ▼
 api/index.py  ──►  api/resolver.py
                         │
-                        │  asyncio.gather() ────────────────────────────────────┐
-                        │                                                        │
-                        ├── 1. VixSrc/VixCloud ───────────────────────────────┐ │
-                        │      a. Risolve IMDb → TMDB  (tmdb.py + cache)      │ │
-                        │      b. Chiama /api/movie|tv/<tmdb>                  │ │
-                        │      c. Estrae URL embed VixCloud                    │ │
-                        │      d. Estrae token/expires/m3u8 dallo script       │ │
-                        │      e. HEAD check disponibilità (opzionale)         │ │
-                        │      f. Proxy HLS interno → Stremio                  │ │
-                        │                                                       │ │
-                        ├── 2. VidXgo ─────────────────────────────────────── │ │
-                        │      Richiede EASYPROXY_URL per funzionare            │ │
-                        │      a. Usa IMDb ID diretto (no TMDB)                │ │
-                        │      b. Costruisce {VIDXGO_DOMAIN}/{imdb}[/s/e]      │ │
-                        │      c. Passa a EasyProxy per token rotation         │ │
-                        │         (fallback: proxy interno, ~5 min poi errore) │ │
-                        │                                                       │ │
-                        └── 3. GuardaHD (solo film) ──────────────────────── ─┘ │
-                               a. Chiama /set-movie-a/{imdb_id}                  │
-                               b. Estrae iframe MixDrop / StreamHG               │
-                               c. Risolve in .m3u8 → proxy interno              │
-                                                                                  │
-                   ┌──────────────────────────────────────────────────────────────┘
+                        │  asyncio.gather() ──────────────────────────────────┐
+                        │                                                      │
+                        ├── 1. VixSrc/VixCloud ─────────────────────────────┐ │
+                        │      a. Risolve IMDb → TMDB  (tmdb.py + cache)    │ │
+                        │      b. Chiama /api/movie|tv/<tmdb>                │ │
+                        │      c. Estrae URL embed VixCloud                  │ │
+                        │      d. Estrae token/expires/m3u8 dallo script     │ │
+                        │      e. HEAD check disponibilità (opzionale)       │ │
+                        │      f. Proxy HLS interno → Stremio                │ │
+                        │                                                     │ │
+                        └── 2. VidXgo ─────────────────────────────────────  │ │
+                               Richiede EASYPROXY_URL per funzionare          │ │
+                               a. Usa IMDb ID diretto (no TMDB)              │ │
+                               b. Costruisce {VIDXGO_DOMAIN}/{imdb}[/s/e]    │ │
+                               c. Passa a EasyProxy per token rotation       │ │
+                                  (fallback: proxy interno, ~5 min poi errore)│ │
+                                                                               │ │
+                   ┌───────────────────────────────────────────────────────────┘ │
+                   │                                                              │
+                   └──────────────────────────────────────────────────────────────┘
                    ▼
            api/proxy.py  ──►  /proxy/manifest.m3u8?url=<encoded>
                                Riscrive URI nel manifest e inoltra segmenti
@@ -83,13 +80,13 @@ Il proxy (`api/proxy.py`) agisce da intermediario tra Stremio e le sorgenti HLS:
 2. `GET /proxy/segment?url=<encoded>` — rileva automaticamente se la risposta è un sotto-manifesto (anche senza `.m3u8` nell'URL) e lo riscrive, altrimenti inoltra il segmento direttamente
 3. Gli header originali (Referer, User-Agent, ecc.) vengono propagati in ogni richiesta tramite `headers_b64`
 
-> Per ambienti multi-client (es. Stremio desktop + GuardaHD sullo stesso server), impostare **`ADDON_BASE_URL`** con l'URL pubblico del servizio; altrimenti viene usato `request.base_url` come fallback (funziona solo per client con lo stesso IP).
+> Per ambienti multi-client (es. Stremio desktop + mobile sullo stesso server), impostare **`ADDON_BASE_URL`** con l'URL pubblico del servizio; altrimenti viene usato `request.base_url` come fallback (funziona solo per client con lo stesso IP).
 
 ### Perché VidXgo richiede EasyProxy
 
 VidXgo firma ogni segmento `.ts` con un token con TTL di ~5 minuti (parametro `e=` epoch ms). Il proxy HLS interno di UFO è **passivo**: legge il manifest una volta e inoltra i segmenti, ma non può rinnovare il token. Dopo ~5 minuti il token scade e la riproduzione si interrompe.
 
-EasyProxy invece ha un **loop interno di rinnovo token** che riscrive i segmenti al volo, garantendo la riproduzione completa. Senza `EASYPROXY_URL`, VidXgo viene comunque proposto come stream ma la riproduzione si interrompere dopo pochi minuti.
+EasyProxy invece ha un **loop interno di rinnovo token** che riscrive i segmenti al volo, garantendo la riproduzione completa. Senza `EASYPROXY_URL`, VidXgo viene comunque proposto come stream ma la riproduzione si interrompe dopo pochi minuti.
 
 ---
 
@@ -102,9 +99,8 @@ UFO/
 │   ├── index.py          # Entry point: app FastAPI, lifespan, route
 │   ├── config.py         # Env vars e validate_config()
 │   ├── tmdb.py           # Risoluzione IMDb → TMDB con cache in-memory e sessione condivisa
-│   ├── resolver.py       # Orchestrazione provider (VixSrc, VidXgo, GuardaHD)
+│   ├── resolver.py       # Orchestrazione provider (VixSrc/VixCloud, VidXgo)
 │   ├── vidxgo.py         # Provider VidXgo (richiede EasyProxy per riproduzione completa)
-│   ├── guardahd.py       # Provider GuardaHD (solo film)
 │   └── proxy.py          # Proxy HLS interno (manifest + segmenti)
 ├── Dockerfile            # Immagine Docker per deploy su VPS/Orange Pi/qualsiasi host
 ├── Procfile              # Avvio per Koyeb: uvicorn api.index:app --port 8000
@@ -121,13 +117,10 @@ Centralizza tutta la configurazione. Le variabili sensibili (`TMDB_KEY`) non han
 Risolve IMDb ID → TMDB ID con **cache in-memory** e **sessione HTTP condivisa** (`AsyncSession` creata una volta sola e riutilizzata). La cache evita chiamate duplicate per lo stesso contenuto durante la sessione.
 
 #### `api/resolver.py`
-Orchestratore principale. Lancia i tre provider in parallelo con `asyncio.gather()` e aggrega tutti gli stream validi nel risultato restituito a Stremio.
+Orchestratore principale. Lancia i due provider in parallelo con `asyncio.gather()` e aggrega tutti gli stream validi nel risultato restituito a Stremio.
 
 #### `api/vidxgo.py`
 Provider VidXgo. Usa l'IMDb ID direttamente (non richiede TMDB). **Richiede `EASYPROXY_URL`** per la riproduzione completa: VidXgo firma ogni segmento con un token TTL ~5 min che solo EasyProxy rinnova automaticamente. Senza EasyProxy viene usato il proxy interno come fallback, ma la riproduzione si interrompe dopo ~5 minuti.
-
-#### `api/guardahd.py`
-Provider GuardaHD, attivo **solo per i film**. Viene eseguito sempre in parallelo con gli altri provider (non è un fallback). Può essere disabilitato con `GUARDAHD_ENABLED=0`.
 
 #### `api/proxy.py`
 Proxy HLS interno. Espone due route (`/proxy/manifest.m3u8` e `/proxy/segment`) e riscrive ogni URI nei manifest per passare per il proxy stesso, propagando gli header originali.
@@ -178,7 +171,7 @@ web: uvicorn api.index:app --host 0.0.0.0 --port 8000
 
 | Variabile | Default | Descrizione |
 |---|---|---|
-| `ADDON_BASE_URL` | *(vuoto)* | URL pubblico fisso del servizio (es. `https://mio-addon.koyeb.app`). **Necessario** per ambienti multi-client (GuardaHD, Stremio desktop + mobile sullo stesso server). Se non impostato, viene usato `request.base_url` come fallback (funziona solo se tutti i client hanno lo stesso IP). |
+| `ADDON_BASE_URL` | *(vuoto)* | URL pubblico fisso del servizio (es. `https://mio-addon.koyeb.app`). **Necessario** per ambienti multi-client (Stremio desktop + mobile sullo stesso server). Se non impostato, viene usato `request.base_url` come fallback (funziona solo se tutti i client hanno lo stesso IP). |
 | `EASYPROXY_URL` | *(vuoto)* | URL base EasyProxy (es. `https://myproxy.koyeb.app`). **Necessario per VidXgo**: senza di esso la riproduzione VidXgo si interrompe dopo ~5 minuti per scadenza token. |
 
 ### Provider
@@ -188,14 +181,11 @@ web: uvicorn api.index:app --host 0.0.0.0 --port 8000
 | `SC_DOMAIN` | `https://vixsrc.to` | Dominio VixSrc alternativo |
 | `VIDXGO_DOMAIN` | `https://v.vidxgo.co` | Dominio VidXgo alternativo |
 | `VIDXGO_ENABLED` | `1` | Abilita il provider VidXgo. Impostare `0` per disabilitarlo |
-| `GUARDAHD_ENABLED` | `1` | Abilita il provider GuardaHD (solo film). Impostare `0` per disabilitarlo |
 | `VIXSRC_SKIP_LIST_CHECK` | *(vuoto)* | Se `1`, salta il controllo HEAD sulla disponibilità del contenuto VixSrc. Utile se VixSrc blocca le richieste HEAD dall'IP del server |
 
 ### EasyProxy
 
 EasyProxy gestisce il **rinnovo automatico dei token** per VidXgo. Ogni segmento `.ts` di VidXgo ha un TTL di ~5 minuti: il proxy interno di UFO è passivo e non può rinnovarli, mentre EasyProxy ha un loop dedicato che li aggiorna al volo.
-
-> EasyProxy non è più usato da VixSrc (rimosso in v1.5.0) né da GuardaHD.
 
 | Variabile | Default | Descrizione |
 |---|---|---|
@@ -243,7 +233,6 @@ Koyeb legge automaticamente il `Procfile`.
 | `EASYPROXY_URL` | ⚠️ Consigliata | URL EasyProxy — necessario per VidXgo (riproduzione > 5 min) |
 | `EASYPROXY_PASSWORD` | ❌ No | Password EasyProxy |
 | `VIDXGO_ENABLED` | ❌ No | `0` per disabilitare VidXgo (default: abilitato) |
-| `GUARDAHD_ENABLED` | ❌ No | `0` per disabilitare GuardaHD (default: abilitato) |
 | `VIXSRC_SKIP_LIST_CHECK` | ❌ No | `1` per saltare il controllo HEAD di VixSrc |
 | `SC_DOMAIN` | ❌ No | Dominio VixSrc alternativo |
 | `USER_AGENT` | ❌ No | User-Agent HTTP personalizzato |
@@ -282,7 +271,6 @@ docker run -d \
   -e EASYPROXY_URL=https://myproxy.example.com \
   -e EASYPROXY_PASSWORD=password_opzionale \
   -e VIDXGO_ENABLED=1 \
-  -e GUARDAHD_ENABLED=1 \
   -e VIXSRC_SKIP_LIST_CHECK=0 \
   --name ufo \
   ufo-addon
@@ -332,7 +320,6 @@ EASYPROXY_URL=https://myproxy.example.com
 
 # Provider (opzionali — tutti abilitati di default)
 # VIDXGO_ENABLED=1
-# GUARDAHD_ENABLED=1
 # VIXSRC_SKIP_LIST_CHECK=0
 
 # Avanzate
@@ -369,12 +356,11 @@ L'autore non è responsabile per danni derivanti dall'uso di questo software.
 ## 📋 Changelog
 
 ### [1.6.0] — 2026-06
-> Proxy HLS interno, VidXgo, GuardaHD
+> Proxy HLS interno e VidXgo
 
 - **feat**: proxy HLS interno (`api/proxy.py`) — riscrive manifest e inoltra segmenti; EasyProxy non è più necessario per VixSrc
 - **feat**: aggiunto provider **VidXgo** (`api/vidxgo.py`) — usa IMDb ID diretto; richiede `EASYPROXY_URL` per la riproduzione completa (token TTL ~5 min)
-- **feat**: aggiunto provider **GuardaHD** (`api/guardahd.py`) — solo film; estrattore MixDrop/StreamHG; disabilitabile con `GUARDAHD_ENABLED=0`
-- **feat**: tutti i provider vengono eseguiti in parallelo con `asyncio.gather()`; tutti gli stream validi vengono restituiti insieme
+- **feat**: entrambi i provider vengono eseguiti in parallelo con `asyncio.gather()`; tutti gli stream validi vengono restituiti insieme
 - **feat**: aggiunta variabile `ADDON_BASE_URL` per ambienti multi-client
 - **feat**: aggiunta variabile `VIXSRC_SKIP_LIST_CHECK` per saltare il controllo HEAD di VixSrc
 - **fix**: `EASYPROXY_URL` mantenuta per VidXgo, non più usata da VixSrc
