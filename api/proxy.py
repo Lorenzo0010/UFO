@@ -11,6 +11,8 @@ Fix applicati:
      specifici ai segmenti CDN che richiedono header particolari.
   5. /proxy/mp4.m3u8 genera un manifest M3U8 sintetico per URL MP4 diretti
      (es. Mixdrop) — il player riceve un HLS valido invece di un link raw.
+  6. /proxy/segment usa streaming vero (iter_bytes) per file MP4 grandi:
+     non carica mai l'intero body in memoria, evita timeout e corruzione.
 """
 
 import base64
@@ -48,6 +50,9 @@ _M3U8_CONTENT_TYPES = {
     "audio/x-mpegurl",
 }
 
+# Chunk size per lo streaming dei segmenti binari (512 KB)
+_CHUNK_SIZE = 512 * 1024
+
 
 def get_client() -> httpx.AsyncClient:
     global _client
@@ -71,7 +76,7 @@ def _decode_headers_param(headers_b64: str | None) -> dict:
     if not headers_b64:
         return {}
     try:
-        decoded = base64.b64decode(headers_b64 + "==" ).decode("utf-8")
+        decoded = base64.b64decode(headers_b64 + "==").decode("utf-8")
         return json.loads(decoded)
     except Exception:
         return {}
@@ -87,21 +92,23 @@ def _build_headers(custom: dict) -> dict:
     return merged
 
 
-def _is_m3u8_content(content_type: str, body: str) -> bool:
-    """Rileva se la risposta è un manifest M3U8 anche quando l'URL non ha .m3u8."""
+def _is_m3u8_content_type(content_type: str) -> bool:
+    """Controlla solo il Content-Type senza leggere il body."""
     ct = content_type.split(";")[0].strip().lower()
-    if ct in _M3U8_CONTENT_TYPES:
+    return ct in _M3U8_CONTENT_TYPES
+
+
+def _is_m3u8_peek(content_type: str, first_bytes: bytes) -> bool:
+    """Rileva M3U8 dal Content-Type o dai primi byte (senza consumare tutto il body)."""
+    if _is_m3u8_content_type(content_type):
         return True
-    return body.lstrip().startswith("#EXTM3U")
+    return first_bytes.lstrip()[:7] == b"#EXTM3U"
 
 
 def _rewrite_manifest(content: str, original_url: str, proxy_base: str, headers_b64: str | None = None) -> str:
     """
     Riscrive un manifest M3U8 sostituendo tutti gli URL con URL proxy.
     Propaga il parametro headers_b64 agli URL riscritti se presente.
-    Gestisce:
-    - Righe URL (segmenti, variant playlist)
-    - URI=\"...\" in qualsiasi direttiva (#EXT-X-KEY, #EXT-X-MAP, #EXT-X-MEDIA, ecc.)
     """
     lines = content.splitlines(keepends=True)
     rewritten = []
@@ -216,8 +223,6 @@ async def proxy_mp4_manifest(url: str, request: Request, headers: str | None = N
 
     Il manifest contiene un singolo segmento che punta all'MP4 tramite
     /proxy/segment, propagando gli header di autenticazione necessari.
-    Questo permette ai player HLS (Stremio, VLC, Infuse) di riprodurre
-    file MP4 diretti che richiedono header specifici (Referer, UA).
     """
     if not url:
         raise HTTPException(status_code=400, detail="Parametro 'url' mancante")
@@ -228,7 +233,6 @@ async def proxy_mp4_manifest(url: str, request: Request, headers: str | None = N
     h_param = f"&headers={quote(headers, safe='')}" if headers else ""
     segment_url = f"{base}/segment?url={quote(url, safe='')}{h_param}"
 
-    # Manifest HLS con singolo segmento MP4 e durata stimata lunga (film)
     manifest = (
         "#EXTM3U\n"
         "#EXT-X-VERSION:3\n"
@@ -250,47 +254,77 @@ async def proxy_mp4_manifest(url: str, request: Request, headers: str | None = N
 @router.get("/segment")
 async def proxy_segment(url: str, request: Request, headers: str | None = None):
     """
-    Proxia segmenti media (.ts, .aac, chiave AES, ecc.).
+    Proxia segmenti media (.ts, .aac, MP4, chiave AES, ecc.).
+
+    Usa streaming vero (iter_bytes) per non caricare mai l'intero body
+    in memoria — fondamentale per file MP4 di grandi dimensioni.
+
     Se la risposta upstream è un M3U8 (sub-playlist senza estensione .m3u8),
-    la riscrive prima di restituirla → enc.key viene proxiato.
+    la legge completamente, la riscrive e la restituisce come testo.
     Supporta header personalizzati via ?headers=<base64-JSON>.
     """
     if not url:
         raise HTTPException(status_code=400, detail="Parametro 'url' mancante")
 
     logger.debug(f"[proxy] segment: {url[:100]}")
-    client = get_client()
     custom_headers = _decode_headers_param(headers)
     effective_headers = _build_headers(custom_headers)
 
     try:
-        resp = await client.get(url, headers=effective_headers)
+        # Apri la connessione in modalità streaming (non scarica tutto subito)
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(60.0),
+            follow_redirects=True,
+        ) as stream_client:
+            async with stream_client.stream("GET", url, headers=effective_headers) as resp:
 
-        if resp.status_code not in (200, 206):
-            logger.warning(f"[proxy] segment HTTP {resp.status_code} per {url[:80]}")
-            raise HTTPException(status_code=resp.status_code, detail="Upstream error")
+                if resp.status_code not in (200, 206):
+                    logger.warning(f"[proxy] segment HTTP {resp.status_code} per {url[:80]}")
+                    raise HTTPException(status_code=resp.status_code, detail="Upstream error")
 
-        content_type = resp.headers.get("content-type", "video/MP2T")
-        body = resp.text
+                content_type = resp.headers.get("content-type", "video/MP2T")
 
-        if _is_m3u8_content(content_type, body):
-            logger.debug(f"[proxy] sub-playlist rilevata, riscrittura: {url[:80]}")
-            rewritten = _rewrite_manifest(body, url, _proxy_base(request), headers)
-            return Response(
-                content=rewritten,
-                media_type="application/vnd.apple.mpegurl",
-                headers={"Access-Control-Allow-Origin": "*", "Cache-Control": "no-cache"},
-            )
+                # Leggi solo i primi 512 byte per il rilevamento M3U8
+                first_chunk = b""
+                async for chunk in resp.aiter_bytes(512):
+                    first_chunk = chunk
+                    break
 
-        async def stream_chunks():
-            yield resp.content
+                # Se è un M3U8 (sub-playlist), leggi tutto e riscrivi
+                if _is_m3u8_peek(content_type, first_chunk):
+                    logger.debug(f"[proxy] sub-playlist rilevata, riscrittura: {url[:80]}")
+                    rest = await resp.aread()
+                    full_body = (first_chunk + rest).decode("utf-8", errors="replace")
+                    rewritten = _rewrite_manifest(full_body, url, _proxy_base(request), headers)
+                    return Response(
+                        content=rewritten,
+                        media_type="application/vnd.apple.mpegurl",
+                        headers={"Access-Control-Allow-Origin": "*", "Cache-Control": "no-cache"},
+                    )
 
-        return StreamingResponse(
-            stream_chunks(),
-            status_code=resp.status_code,
-            media_type=content_type,
-            headers={"Access-Control-Allow-Origin": "*", "Cache-Control": "no-cache"},
-        )
+                # Altrimenti: streaming binario progressivo
+                # Propaga Content-Length e Accept-Ranges se disponibili
+                extra_headers: dict[str, str] = {
+                    "Access-Control-Allow-Origin": "*",
+                    "Cache-Control": "no-cache",
+                }
+                if cl := resp.headers.get("content-length"):
+                    extra_headers["Content-Length"] = cl
+                if ar := resp.headers.get("accept-ranges"):
+                    extra_headers["Accept-Ranges"] = ar
+
+                async def _stream_body():
+                    yield first_chunk
+                    async for chunk in resp.aiter_bytes(_CHUNK_SIZE):
+                        yield chunk
+
+                return StreamingResponse(
+                    _stream_body(),
+                    status_code=resp.status_code,
+                    media_type=content_type,
+                    headers=extra_headers,
+                )
+
     except httpx.RequestError as e:
         logger.error(f"[proxy] segment request error: {e}")
         raise HTTPException(status_code=502, detail="Upstream non raggiungibile")
