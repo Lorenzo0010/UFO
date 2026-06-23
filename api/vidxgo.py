@@ -4,10 +4,11 @@ vidxgo.py — Provider VidXgo per UFO.
 URL pattern (movie):  {VD_DOMAIN}/{imdb_id}
 URL pattern (series): {VD_DOMAIN}/{imdb_id}/{season}/{episode}
 
-Resolver nativo (port di StreamVix/src/extractors/vidxgo.ts):
+Resolver nativo (port di StreamVix/src/extractors/vidxgo.ts, fix indice script):
   1. GET della pagina embed con User-Agent Firefox-150 e Referer altadefinizione.you
-  2. Parsing del 6° <script> tag (index 5) con regex (nessun DOM, zero overhead)
-  3. Regex `var <name>='KEY',d=atob('B64')` → XOR ciclico byte-by-byte con KEY
+  2. Scan di TUTTI gli script inline alla ricerca della regex key/payload XOR
+     (non più indice fisso [5] che era fragile se preceduto da script esterni)
+  3. base64-decode + XOR ciclico byte-per-byte con KEY
   4. Nel JS decrittato cerca `currentSrc+"https://..."` → URL M3U8 finale
   5. Gli header di playback vengono passati al proxy interno via ?headers=<base64-JSON>
 """
@@ -75,14 +76,14 @@ def _playback_headers(domain: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Logica di decrittazione — port di decodeVidXgoHtml (vidxgo.ts)
+# Logica di decrittazione
 # ---------------------------------------------------------------------------
 
 # Regex per estrarre tutti i <script> tag (inline + external)
 _SCRIPT_RE = re.compile(r"<script\b([^>]*)>([\s\S]*?)<\/script>", re.IGNORECASE)
 # Regex per riconoscere script esterni (hanno `src=`)
 _SCRIPT_SRC_RE = re.compile(r"\bsrc\s*=", re.IGNORECASE)
-# Regex chiave XOR + payload base64 nel 6° script
+# Regex chiave XOR + payload base64 — cerca in tutti gli script inline
 _KEY_PAYLOAD_RE = re.compile(r"var\s+\w+\s*=\s*'([^']*)'\s*,\s*d\s*=\s*atob\(\s*'([^']*)'")
 # Regex URL HLS nel JS decrittato
 _CURRENTSRC_RE = re.compile(r'currentSrc.+?"(https:[^";]+)"')
@@ -91,59 +92,73 @@ _CURRENTSRC_RE = re.compile(r'currentSrc.+?"(https:[^";]+)"')
 def _decode_vidxgo_html(html: str) -> Optional[str]:
     """
     Estrae l'URL M3U8 dall'HTML della pagina embed di VidXgo.
-    Port Python di StreamVix decodeVidXgoHtml (TypeScript).
-    Restituisce None se qualsiasi step fallisce.
+
+    Strategia: scansiona TUTTI gli script inline (non più indice fisso)
+    cercando il pattern `var KEY='...', d=atob('...')`. In questo modo
+    funziona indipendentemente da quanti script esterni precedono il target.
     """
-    # Raccoglie i body degli script mantenendo gli slot degli script esterni
-    script_bodies: list[str] = []
+    inline_scripts: list[str] = []
+    total_scripts = 0
+
     for m in _SCRIPT_RE.finditer(html):
+        total_scripts += 1
         attrs = m.group(1) or ""
-        if _SCRIPT_SRC_RE.search(attrs):
-            script_bodies.append("")           # esterno: slot vuoto, come in StreamVix
-        else:
-            script_bodies.append(m.group(2) or "")
+        if not _SCRIPT_SRC_RE.search(attrs):
+            body = m.group(2) or ""
+            if body.strip():
+                inline_scripts.append(body)
 
-    if len(script_bodies) <= 5:
-        logger.warning("[VidXgo][decode] trovati solo %d <script> tag (attesi >5)", len(script_bodies))
-        return None
+    logger.debug(
+        "[VidXgo][decode] %d script tag totali, %d inline non vuoti",
+        total_scripts, len(inline_scripts),
+    )
 
-    target = script_bodies[5]
-    if not target:
-        logger.warning("[VidXgo][decode] script[5] è vuoto")
-        return None
+    # Cerca il pattern XOR in tutti gli script inline
+    for idx, body in enumerate(inline_scripts):
+        km = _KEY_PAYLOAD_RE.search(body)
+        if not km:
+            continue
 
-    km = _KEY_PAYLOAD_RE.search(target)
-    if not km:
-        logger.warning("[VidXgo][decode] regex chiave/payload non trovata in script[5]")
-        return None
+        key = km.group(1)
+        b64 = km.group(2)
+        if not key or not b64:
+            logger.warning("[VidXgo][decode] script inline #%d: chiave o payload vuoti", idx)
+            continue
 
-    key = km.group(1)
-    b64 = km.group(2)
-    if not key or not b64:
-        return None
+        logger.debug("[VidXgo][decode] pattern trovato nello script inline #%d", idx)
 
-    try:
-        decoded = base64.b64decode(b64 + "==")
-    except Exception as e:
-        logger.warning("[VidXgo][decode] base64 decode fallita: %s", e)
-        return None
+        try:
+            decoded = base64.b64decode(b64 + "==")
+        except Exception as e:
+            logger.warning("[VidXgo][decode] base64 decode fallita (script #%d): %s", idx, e)
+            continue
 
-    # XOR ciclico con la chiave
-    key_bytes = key.encode("utf-8")
-    key_len = len(key_bytes)
-    decrypted = bytes(b ^ key_bytes[i % key_len] for i, b in enumerate(decoded))
+        # XOR ciclico con la chiave
+        key_bytes = key.encode("utf-8")
+        key_len = len(key_bytes)
+        decrypted_bytes = bytes(b ^ key_bytes[i % key_len] for i, b in enumerate(decoded))
 
-    try:
-        decrypted_str = decrypted.decode("utf-8")
-    except UnicodeDecodeError:
-        decrypted_str = decrypted.decode("latin-1")
+        try:
+            decrypted_str = decrypted_bytes.decode("utf-8")
+        except UnicodeDecodeError:
+            decrypted_str = decrypted_bytes.decode("latin-1")
 
-    url_match = _CURRENTSRC_RE.search(decrypted_str)
-    if not url_match:
-        logger.warning("[VidXgo][decode] nessun URL currentSrc trovato nel JS decrittato")
-        return None
+        url_match = _CURRENTSRC_RE.search(decrypted_str)
+        if not url_match:
+            logger.warning(
+                "[VidXgo][decode] nessun URL currentSrc nel JS decrittato (script inline #%d)", idx
+            )
+            continue
 
-    return url_match.group(1).replace("\\", "")
+        m3u8_url = url_match.group(1).replace("\\", "")
+        logger.info("[VidXgo][decode] ✅ M3U8 trovato (script inline #%d): %s", idx, m3u8_url[:80])
+        return m3u8_url
+
+    logger.warning(
+        "[VidXgo][decode] pattern key/payload non trovato in nessuno dei %d script inline",
+        len(inline_scripts),
+    )
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -170,7 +185,6 @@ async def _fetch_and_extract(embed_url: str) -> Optional[tuple[str, dict]]:
     if not m3u8:
         return None
 
-    # Dominio per gli header di playback (Origin/Referer CDN)
     from urllib.parse import urlparse
     parsed = urlparse(embed_url)
     domain = f"{parsed.scheme}://{parsed.netloc}"
