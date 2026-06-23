@@ -20,11 +20,6 @@ VIDXGO_ENABLED = os.getenv("VIDXGO_ENABLED", "1")   # imposta 0 per disabilitare
 # Se non impostato, si usa request.base_url come fallback (single-client only).
 ADDON_BASE_URL = os.getenv("ADDON_BASE_URL", "").rstrip("/")
 
-# EasyProxy rimosso — il proxy HLS è ora interno a UFO
-# Mantenuto per retrocompatibilità ma non più usato
-EASYPROXY_URL = os.getenv("EASYPROXY_URL", "").rstrip("/")
-EASYPROXY_PSW = os.getenv("EASYPROXY_PASSWORD", "")
-
 
 def validate_config() -> None:
     """Verifica che le variabili obbligatorie siano presenti all'avvio."""
@@ -37,9 +32,6 @@ def validate_config() -> None:
             logger.warning(f"⚠️  Variabile d'ambiente mancante: {var}")
     else:
         logger.info("✅ Configurazione validata con successo")
-
-    if EASYPROXY_URL:
-        logger.info("ℹ️  EASYPROXY_URL impostata ma non usata — il proxy HLS è ora interno")
 
     if ADDON_BASE_URL:
         logger.info(f"ℹ️  ADDON_BASE_URL (fisso): {ADDON_BASE_URL}")
