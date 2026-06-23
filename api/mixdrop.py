@@ -6,7 +6,8 @@ Flusso:
   2. Trova il tag <script> con eval(function(p,a,c,k,e,d){...}) (p.a.c.k.e.r)
   3. Deoffusca con unpack()
   4. Regex MDCore.wurl = "<url>" sul codice deoffuscato
-  5. Restituisce "https:" + url come stream diretto MP4
+  5. Restituisce lo stream wrappato in un M3U8 sintetico via /proxy/mp4.m3u8
+     (il player riceve un HLS valido invece di un link MP4 grezzo)
 
 Non richiede dipendenze esterne oltre httpx e BeautifulSoup4.
 """
@@ -191,6 +192,10 @@ async def resolve_mixdrop(
     """
     Risolve un link embed Mixdrop in uno stream Stremio.
 
+    Il link MP4 diretto di Mixdrop viene wrappato in un manifest M3U8
+    sintetico tramite /proxy/mp4.m3u8, così il player riceve un flusso
+    HLS standard invece di un link raw che molti player rifiutano.
+
     Args:
         embed_url:       URL embed Mixdrop (es. https://mixdrop.cv/e/abc123)
         content_label:   Titolo del film/episodio
@@ -209,9 +214,10 @@ async def resolve_mixdrop(
         return None
 
     video_url = ("https:" + raw_url) if raw_url.startswith("//") else raw_url
-    logger.info(f"[Mixdrop] ✅ URL diretto: {video_url[:100]}")
+    logger.info(f"[Mixdrop] ✅ URL MP4 diretto: {video_url[:100]}")
 
-    # Mixdrop serve MP4 diretto — wrappalo nel proxy con UA Chrome
+    # Mixdrop serve MP4 diretto — wrappalo in un M3U8 sintetico via /proxy/mp4.m3u8
+    # con gli header necessari (UA e Referer di Mixdrop) passati come ?headers=
     playback_headers = {
         "User-Agent": _MIXDROP_UA,
         "Referer": "https://mixdrop.cv/",
@@ -220,7 +226,9 @@ async def resolve_mixdrop(
 
     base = addon_base_url.rstrip("/")
     from urllib.parse import quote as _quote
-    proxy_url = f"{base}/proxy/manifest.m3u8?url={_quote(video_url, safe='')}&headers={headers_b64}"
+    proxy_url = f"{base}/proxy/mp4.m3u8?url={_quote(video_url, safe='')}&headers={headers_b64}"
+
+    logger.info(f"[Mixdrop] 🎬 stream HLS sintetico: {proxy_url[:120]}")
 
     return {
         "name": f"UFO\n🎬 {source_name}",

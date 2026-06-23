@@ -9,6 +9,8 @@ Fix applicati:
   4. Supporto header dinamici via ?headers=<base64-JSON>:
      usato da VidXgo (e altri provider futuri) per passare Origin/Referer/UA
      specifici ai segmenti CDN che richiedono header particolari.
+  5. /proxy/mp4.m3u8 genera un manifest M3U8 sintetico per URL MP4 diretti
+     (es. Mixdrop) — il player riceve un HLS valido invece di un link raw.
 """
 
 import base64
@@ -191,6 +193,57 @@ async def proxy_manifest(url: str, request: Request, headers: str | None = None)
     except httpx.RequestError as e:
         logger.error(f"[proxy] manifest request error: {e}")
         raise HTTPException(status_code=502, detail="Upstream non raggiungibile")
+
+
+# ── HEAD mp4.m3u8 ─────────────────────────────────────────────────────────────
+@router.head("/mp4.m3u8")
+async def proxy_mp4_manifest_head(url: str, request: Request, headers: str | None = None):
+    """Risponde alle richieste HEAD per il manifest M3U8 sintetico MP4."""
+    if not url:
+        raise HTTPException(status_code=400, detail="Parametro 'url' mancante")
+    return Response(
+        content=b"",
+        media_type="application/vnd.apple.mpegurl",
+        headers={"Access-Control-Allow-Origin": "*", "Cache-Control": "no-cache"},
+    )
+
+
+# ── GET mp4.m3u8 ──────────────────────────────────────────────────────────────
+@router.get("/mp4.m3u8")
+async def proxy_mp4_manifest(url: str, request: Request, headers: str | None = None):
+    """
+    Genera un manifest M3U8 sintetico per un URL MP4 diretto (es. Mixdrop).
+
+    Il manifest contiene un singolo segmento che punta all'MP4 tramite
+    /proxy/segment, propagando gli header di autenticazione necessari.
+    Questo permette ai player HLS (Stremio, VLC, Infuse) di riprodurre
+    file MP4 diretti che richiedono header specifici (Referer, UA).
+    """
+    if not url:
+        raise HTTPException(status_code=400, detail="Parametro 'url' mancante")
+
+    logger.info(f"[proxy] mp4.m3u8 sintetico per: {url[:100]}")
+
+    base = _proxy_base(request)
+    h_param = f"&headers={quote(headers, safe='')}" if headers else ""
+    segment_url = f"{base}/segment?url={quote(url, safe='')}{h_param}"
+
+    # Manifest HLS con singolo segmento MP4 e durata stimata lunga (film)
+    manifest = (
+        "#EXTM3U\n"
+        "#EXT-X-VERSION:3\n"
+        "#EXT-X-TARGETDURATION:7200\n"
+        "#EXT-X-MEDIA-SEQUENCE:0\n"
+        "#EXTINF:7200.0,\n"
+        f"{segment_url}\n"
+        "#EXT-X-ENDLIST\n"
+    )
+
+    return Response(
+        content=manifest,
+        media_type="application/vnd.apple.mpegurl",
+        headers={"Access-Control-Allow-Origin": "*", "Cache-Control": "no-cache"},
+    )
 
 
 # ── GET segmento ──────────────────────────────────────────────────────────────
