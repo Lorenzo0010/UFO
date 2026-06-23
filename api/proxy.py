@@ -13,6 +13,9 @@ Fix applicati:
      (es. Mixdrop) — il player riceve un HLS valido invece di un link raw.
   6. /proxy/segment usa streaming vero (iter_bytes) per file MP4 grandi:
      non carica mai l'intero body in memoria, evita timeout e corruzione.
+  7. Fix StreamConsumed: il context manager dello stream viene mantenuto
+     vivo per tutta la durata della StreamingResponse tramite un generatore
+     asincrono dedicato che non esce dal `async with` prima del completamento.
 """
 
 import base64
@@ -262,6 +265,11 @@ async def proxy_segment(url: str, request: Request, headers: str | None = None):
     Se la risposta upstream è un M3U8 (sub-playlist senza estensione .m3u8),
     la legge completamente, la riscrive e la restituisce come testo.
     Supporta header personalizzati via ?headers=<base64-JSON>.
+
+    FIX StreamConsumed: il generatore asincrono `_stream_body` mantiene
+    aperto il context manager httpx per tutta la durata dello streaming,
+    evitando che venga chiuso prima che la StreamingResponse finisca di
+    inviare i dati al client.
     """
     if not url:
         raise HTTPException(status_code=400, detail="Parametro 'url' mancante")
@@ -270,61 +278,77 @@ async def proxy_segment(url: str, request: Request, headers: str | None = None):
     custom_headers = _decode_headers_param(headers)
     effective_headers = _build_headers(custom_headers)
 
+    # Usiamo un client dedicato per-segmento con timeout più lungo.
+    # NON usiamo il client globale get_client() perché lo stream deve
+    # rimanere aperto oltre il return di questa funzione, e un client
+    # condiviso potrebbe essere chiuso da altre richieste concorrenti.
+    segment_client = httpx.AsyncClient(
+        timeout=httpx.Timeout(60.0),
+        follow_redirects=True,
+    )
+
     try:
-        # Apri la connessione in modalità streaming (non scarica tutto subito)
-        async with httpx.AsyncClient(
-            timeout=httpx.Timeout(60.0),
-            follow_redirects=True,
-        ) as stream_client:
-            async with stream_client.stream("GET", url, headers=effective_headers) as resp:
+        # Invia la richiesta e ottieni gli header senza consumare il body
+        req = segment_client.build_request("GET", url, headers=effective_headers)
+        resp = await segment_client.send(req, stream=True)
 
-                if resp.status_code not in (200, 206):
-                    logger.warning(f"[proxy] segment HTTP {resp.status_code} per {url[:80]}")
-                    raise HTTPException(status_code=resp.status_code, detail="Upstream error")
+        if resp.status_code not in (200, 206):
+            await resp.aclose()
+            await segment_client.aclose()
+            logger.warning(f"[proxy] segment HTTP {resp.status_code} per {url[:80]}")
+            raise HTTPException(status_code=resp.status_code, detail="Upstream error")
 
-                content_type = resp.headers.get("content-type", "video/MP2T")
+        content_type = resp.headers.get("content-type", "video/MP2T")
 
-                # Leggi solo i primi 512 byte per il rilevamento M3U8
-                first_chunk = b""
-                async for chunk in resp.aiter_bytes(512):
-                    first_chunk = chunk
-                    break
+        # Leggi solo i primi 512 byte per il rilevamento M3U8 (senza consumare lo stream)
+        first_chunk = b""
+        async for chunk in resp.aiter_bytes(512):
+            first_chunk = chunk
+            break
 
-                # Se è un M3U8 (sub-playlist), leggi tutto e riscrivi
-                if _is_m3u8_peek(content_type, first_chunk):
-                    logger.debug(f"[proxy] sub-playlist rilevata, riscrittura: {url[:80]}")
-                    rest = await resp.aread()
-                    full_body = (first_chunk + rest).decode("utf-8", errors="replace")
-                    rewritten = _rewrite_manifest(full_body, url, _proxy_base(request), headers)
-                    return Response(
-                        content=rewritten,
-                        media_type="application/vnd.apple.mpegurl",
-                        headers={"Access-Control-Allow-Origin": "*", "Cache-Control": "no-cache"},
-                    )
+        # Se è un M3U8 (sub-playlist), leggi tutto e riscrivi
+        if _is_m3u8_peek(content_type, first_chunk):
+            logger.debug(f"[proxy] sub-playlist rilevata, riscrittura: {url[:80]}")
+            rest = await resp.aread()
+            await resp.aclose()
+            await segment_client.aclose()
+            full_body = (first_chunk + rest).decode("utf-8", errors="replace")
+            rewritten = _rewrite_manifest(full_body, url, _proxy_base(request), headers)
+            return Response(
+                content=rewritten,
+                media_type="application/vnd.apple.mpegurl",
+                headers={"Access-Control-Allow-Origin": "*", "Cache-Control": "no-cache"},
+            )
 
-                # Altrimenti: streaming binario progressivo
-                # Propaga Content-Length e Accept-Ranges se disponibili
-                extra_headers: dict[str, str] = {
-                    "Access-Control-Allow-Origin": "*",
-                    "Cache-Control": "no-cache",
-                }
-                if cl := resp.headers.get("content-length"):
-                    extra_headers["Content-Length"] = cl
-                if ar := resp.headers.get("accept-ranges"):
-                    extra_headers["Accept-Ranges"] = ar
+        # Altrimenti: streaming binario progressivo.
+        # Il generatore mantiene vivi resp e segment_client per tutta la
+        # durata della StreamingResponse — vengono chiusi solo al termine.
+        extra_headers: dict[str, str] = {
+            "Access-Control-Allow-Origin": "*",
+            "Cache-Control": "no-cache",
+        }
+        if cl := resp.headers.get("content-length"):
+            extra_headers["Content-Length"] = cl
+        if ar := resp.headers.get("accept-ranges"):
+            extra_headers["Accept-Ranges"] = ar
 
-                async def _stream_body():
-                    yield first_chunk
-                    async for chunk in resp.aiter_bytes(_CHUNK_SIZE):
-                        yield chunk
+        async def _stream_body():
+            try:
+                yield first_chunk
+                async for chunk in resp.aiter_bytes(_CHUNK_SIZE):
+                    yield chunk
+            finally:
+                await resp.aclose()
+                await segment_client.aclose()
 
-                return StreamingResponse(
-                    _stream_body(),
-                    status_code=resp.status_code,
-                    media_type=content_type,
-                    headers=extra_headers,
-                )
+        return StreamingResponse(
+            _stream_body(),
+            status_code=resp.status_code,
+            media_type=content_type,
+            headers=extra_headers,
+        )
 
     except httpx.RequestError as e:
+        await segment_client.aclose()
         logger.error(f"[proxy] segment request error: {e}")
         raise HTTPException(status_code=502, detail="Upstream non raggiungibile")
