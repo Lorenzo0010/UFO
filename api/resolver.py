@@ -38,6 +38,15 @@ from .vidxgo import resolve_vidxgo
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
+# Global Stats
+# ---------------------------------------------------------------------------
+PROVIDER_STATS = {
+    "vixcloud": {"total": 0, "success": 0},
+    "vidxgo": {"total": 0, "success": 0},
+}
+
+
+# ---------------------------------------------------------------------------
 # Costanti
 # ---------------------------------------------------------------------------
 
@@ -468,16 +477,21 @@ async def get_streams(
         )
 
         # VixCloud
+        PROVIDER_STATS["vixcloud"]["total"] += 1
         if isinstance(vixcloud_stream, Exception):
             logger.error(f"❌ VixCloud exception: {vixcloud_stream}")
         elif isinstance(vixcloud_stream, dict):
+            PROVIDER_STATS["vixcloud"]["success"] += 1
             result["streams"].append(vixcloud_stream)
 
         # VidXgo
-        if isinstance(vidxgo_stream, Exception):
-            logger.error(f"❌ VidXgo exception: {vidxgo_stream}")
-        elif isinstance(vidxgo_stream, dict):
-            result["streams"].append(vidxgo_stream)
+        if imdb_id:
+            PROVIDER_STATS["vidxgo"]["total"] += 1
+            if isinstance(vidxgo_stream, Exception):
+                logger.error(f"❌ VidXgo exception: {vidxgo_stream}")
+            elif isinstance(vidxgo_stream, dict):
+                PROVIDER_STATS["vidxgo"]["success"] += 1
+                result["streams"].append(vidxgo_stream)
 
     except Exception as e:
         logger.error(f"❌ get_streams error: {e}")
