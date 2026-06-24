@@ -41,7 +41,7 @@ def _get_base(request: Request) -> str:
     """Restituisce il base URL del proxy.
     Priorità: ADDON_BASE_URL (env, fisso) > request.base_url (dinamico).
     ADDON_BASE_URL è necessario quando più client con IP diversi accedono
-    all'addon (es. Stremio desktop + GuardaHD sullo stesso server).
+    all'addon (es. Stremio desktop su più client).
     """
     if ADDON_BASE_URL:
         return ADDON_BASE_URL

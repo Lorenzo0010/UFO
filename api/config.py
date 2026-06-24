@@ -14,11 +14,7 @@ USER_AGENT   = os.getenv("USER_AGENT", "Mozilla/5.0 (Windows NT 10.0; Win64; x64
 VIDXGO_DOMAIN  = os.getenv("VIDXGO_DOMAIN", "https://v.vidxgo.co")
 VIDXGO_ENABLED = os.getenv("VIDXGO_ENABLED", "1")   # imposta 0 per disabilitare
 
-# GuardaHD provider
-GHD_DOMAIN       = os.getenv("GHD_DOMAIN", "https://mostraguarda.stream").rstrip("/")
-GUARDAHD_ENABLED = os.getenv("GUARDAHD_ENABLED", "1")  # imposta 0 per disabilitare
-
-# Base URL fisso per il proxy interno — OBBLIGATORIO se si usa GuardaHD o
+# Base URL fisso per il proxy interno — OBBLIGATORIO se si usa
 # qualsiasi client che accede da un IP diverso da quello che ha fatto la
 # richiesta /stream. Es: http://192.168.1.77:7000
 # Se non impostato, si usa request.base_url come fallback (single-client only).
@@ -40,7 +36,7 @@ def validate_config() -> None:
     if ADDON_BASE_URL:
         logger.info(f"ℹ️  ADDON_BASE_URL (fisso): {ADDON_BASE_URL}")
     else:
-        logger.warning("⚠️  ADDON_BASE_URL non impostata — uso request.base_url (potrebbe rompere GuardaHD/multi-client)")
+        logger.warning("⚠️  ADDON_BASE_URL non impostata — uso request.base_url (potrebbe non funzionare con multi-client)")
 
     logger.info(f"ℹ️  VidXgo:   {'abilitato' if VIDXGO_ENABLED not in ('0','false','off','no') else 'disabilitato'} ({VIDXGO_DOMAIN})")
-    logger.info(f"ℹ️  GuardaHD: {'abilitato' if GUARDAHD_ENABLED not in ('0','false','off','no') else 'disabilitato'} ({GHD_DOMAIN})")
+

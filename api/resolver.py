@@ -1,5 +1,5 @@
 """
-resolver.py — estrazione M3U8 da VixSrc/VixCloud + VidXgo + GuardaHD.
+resolver.py — estrazione M3U8 da VixSrc/VixCloud + VidXgo.
 
 Flusso per VixSrc/VixCloud:
   1. GET /api/tv/<tmdb>/<s>/<e> oppure /api/movie/<tmdb>
@@ -13,13 +13,7 @@ Flusso per VidXgo:
   - Costruisce {VIDXGO_DOMAIN}/{imdb_id}[/{s}/{e}]
   - Passa l'URL al proxy HLS interno (come VixCloud)
 
-Flusso per GuardaHD:
-  - Solo film, richiede IMDB ID
-  - GET {GHD_DOMAIN}/set-movie-a/{imdb_id} → estrae embed Mixdrop
-  - Deoffusca p.a.c.k.e.r → estrae URL MP4 diretto
-  - Wrappa nel proxy UFO
-
-Tutti e tre i provider vengono lanciati con asyncio.gather().
+Entrambi i provider vengono lanciati con asyncio.gather().
 Tutti gli stream validi vengono restituiti insieme.
 """
 
@@ -39,7 +33,7 @@ from .config import SC_DOMAIN, USER_AGENT
 from .proxy import encode_headers_b64
 from .tmdb import get_tmdb_info, get_episode_title
 from .vidxgo import resolve_vidxgo
-from .guardahd import resolve_guardahd
+
 
 logger = logging.getLogger(__name__)
 
@@ -419,7 +413,7 @@ async def get_streams(
       content_type    "movie" | "series"
       addon_base_url  base URL dell'addon per costruire URL proxy interno
 
-    Lancia VixCloud, VidXgo e GuardaHD in parallelo con asyncio.gather().
+    Lancia VixCloud e VidXgo in parallelo con asyncio.gather().
     Restituisce tutti gli stream validi trovati.
     """
     result: Dict = {"streams": []}
@@ -466,22 +460,10 @@ async def get_streams(
                 return None
             vidxgo_coro = _noop_vidxgo()
 
-        # --- Coroutine GuardaHD (film e serie TV con IMDB ID) ---
-        if imdb_id:
-            guardahd_coro = resolve_guardahd(
-                imdb_id, content_label, content_type, addon_base_url,
-                season=season, episode=episode,
-            )
-        else:
-            async def _noop_guardahd():
-                return []
-            guardahd_coro = _noop_guardahd()
-
-        # --- Lancia tutti e tre in parallelo ---
-        vixcloud_stream, vidxgo_stream, guardahd_stream = await asyncio.gather(
+        # --- Lancia entrambi in parallelo ---
+        vixcloud_stream, vidxgo_stream = await asyncio.gather(
             vixcloud_coro,
             vidxgo_coro,
-            guardahd_coro,
             return_exceptions=True,
         )
 
@@ -496,14 +478,6 @@ async def get_streams(
             logger.error(f"❌ VidXgo exception: {vidxgo_stream}")
         elif isinstance(vidxgo_stream, dict):
             result["streams"].append(vidxgo_stream)
-
-        # GuardaHD (restituisce una lista di stream)
-        if isinstance(guardahd_stream, Exception):
-            logger.error(f"❌ GuardaHD exception: {guardahd_stream}")
-        elif isinstance(guardahd_stream, list):
-            for gs in guardahd_stream:
-                if isinstance(gs, dict):
-                    result["streams"].append(gs)
 
     except Exception as e:
         logger.error(f"❌ get_streams error: {e}")
