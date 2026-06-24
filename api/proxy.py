@@ -50,7 +50,11 @@ _M3U8_CONTENT_TYPES = {
 def get_client() -> httpx.AsyncClient:
     global _client
     if _client is None or _client.is_closed:
-        _client = httpx.AsyncClient(timeout=_TIMEOUT, follow_redirects=True)
+        _client = httpx.AsyncClient(
+            timeout=_TIMEOUT,
+            follow_redirects=True,
+            verify=False,  # CDN di terze parti (es. serversicuro.cc) possono avere cert non validi
+        )
     return _client
 
 
