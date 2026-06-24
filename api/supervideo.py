@@ -57,43 +57,54 @@ async def _extract_supervideo_m3u8(embed_url: str) -> Optional[str]:
     e cerca sources:[{file:"<url>"}.
     Restituisce l'URL HLS M3U8, oppure None.
     """
-    # Normalizza URL: forza dominio .tv e path /e/
+    # Normalizza URL e path /e/
     url = embed_url
     if url.startswith("//"):
         url = "https:" + url
 
-    # Estrai l'ID dall'URL ed usa il dominio canonico
+    # Estrai l'ID dall'URL
     parts = url.rstrip("/").split("/")
     video_id = parts[-1] if parts else ""
     if not video_id:
         return None
 
-    canonical_url = f"https://supervideo.tv/e/{video_id}"
-    referer = "https://supervideo.tv/"
+    # Prova i domini in ordine: .cc è il più affidabile attualmente
+    _DOMAINS = ["supervideo.cc", "supervideo.tv"]
 
-    headers = {
-        "User-Agent": _SUPERVIDEO_UA,
-        "Referer": referer,
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    }
+    html = None
+    used_domain = None
 
-    logger.info(f"[SuperVideo] ▶️  fetch embed: {canonical_url}")
+    for domain in _DOMAINS:
+        try_url = f"https://{domain}/e/{video_id}"
+        referer = f"https://{domain}/"
 
-    try:
-        async with httpx.AsyncClient(timeout=_TIMEOUT, follow_redirects=True) as client:
-            resp = await client.get(canonical_url, headers=headers)
-            if resp.status_code != 200:
-                logger.warning(f"[SuperVideo] HTTP {resp.status_code} per {canonical_url}")
-                return None
-    except Exception as e:
-        logger.warning(f"[SuperVideo] errore fetch per {canonical_url}: {e}")
+        headers = {
+            "User-Agent": _SUPERVIDEO_UA,
+            "Referer": referer,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        }
+
+        logger.info(f"[SuperVideo] ▶️  fetch embed: {try_url}")
+
+        try:
+            async with httpx.AsyncClient(timeout=_TIMEOUT, follow_redirects=True) as client:
+                resp = await client.get(try_url, headers=headers)
+                if resp.status_code == 200:
+                    html = resp.text
+                    used_domain = domain
+                    break
+                else:
+                    logger.warning(f"[SuperVideo] HTTP {resp.status_code} per {try_url}")
+        except Exception as e:
+            logger.warning(f"[SuperVideo] errore fetch per {try_url}: {e}")
+
+    if html is None:
+        logger.warning(f"[SuperVideo] ❌ nessun dominio raggiungibile per video {video_id}")
         return None
-
-    html = resp.text
 
     # Cloudflare check
     if "Cloudflare" in html or "Just a moment" in html:
-        logger.warning(f"[SuperVideo] Cloudflare challenge per {canonical_url}")
+        logger.warning(f"[SuperVideo] Cloudflare challenge per https://{used_domain}/e/{video_id}")
         return None
 
     # Cerca script p.a.c.k.e.r
@@ -113,7 +124,7 @@ async def _extract_supervideo_m3u8(embed_url: str) -> Optional[str]:
             except _UnpackingError as e:
                 logger.debug(f"[SuperVideo] unpack error: {e}")
 
-    logger.info(f"[SuperVideo] ℹ️  nessun stream trovato per {canonical_url}")
+    logger.info(f"[SuperVideo] ℹ️  nessun stream trovato per https://{used_domain}/e/{video_id}")
     return None
 
 

@@ -282,10 +282,14 @@ async def resolve_guardahd(
 
         # Estrai titolo reale dalla pagina
         real_title = _extract_title(html)
-        if real_title:
+        # MostraGuarda spesso restituisce titoli placeholder come "Movie tt0816692"
+        # In quel caso usiamo il titolo TMDB passato dal resolver
+        if real_title and imdb_id not in real_title and not re.match(r"^Movie\s+tt\d+", real_title):
             logger.info(f"[GuardaHD] 📝 titolo: {real_title}")
             label = real_title
         else:
+            if real_title:
+                logger.debug(f"[GuardaHD] titolo placeholder ignorato: {real_title}")
             label = content_label
 
         # Estrai tutti gli embed URL
