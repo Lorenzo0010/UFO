@@ -138,14 +138,26 @@ def _packer_unpack(source: str) -> str:
 # ---------------------------------------------------------------------------
 
 def _normalize_mixdrop_url(url: str) -> str:
-    """Converte domini alternativi (club, cfd) nel dominio cv standard."""
+    """Converte domini alternativi nel dominio cv standard."""
+    # Varianti di dominio osservate: mixdrop.club, mixdrop.cfd, m1xdrop.*, m1xdr0p.*
+    url = re.sub(r"m1xdr0p\.\w+", "mixdrop.cv", url)
+    url = re.sub(r"m1xdrop\.\w+", "mixdrop.cv", url)
     if "mixdrop.club" in url:
         url = url.replace("mixdrop.club", "mixdrop.cv")
     if "mixdrop.cfd" in url:
-        url = url.replace("mixdrop.cfd", "mixdrop.cv").replace("/emb/", "/e/")
+        url = url.replace("mixdrop.cfd", "mixdrop.cv")
+    if "mixdrop.co" in url and "mixdrop.cv" not in url:
+        url = url.replace("mixdrop.co", "mixdrop.cv")
+    # Normalizza path /emb/ → /e/
+    url = url.replace("/emb/", "/e/")
     # Rimuove eventuali suffissi /2... aggiunti da provider
     url = url.split("/2")[0]
     return url
+
+
+def is_mixdrop_url(url: str) -> bool:
+    """Restituisce True se l'URL è un embed Mixdrop (qualsiasi variante di dominio)."""
+    return bool(re.search(r"mixdrop|m1xdrop|m[i1]xdr[o0]p", url, re.IGNORECASE))
 
 
 # ---------------------------------------------------------------------------

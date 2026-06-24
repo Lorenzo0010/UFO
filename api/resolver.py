@@ -466,14 +466,15 @@ async def get_streams(
                 return None
             vidxgo_coro = _noop_vidxgo()
 
-        # --- Coroutine GuardaHD (solo film con IMDB ID) ---
-        if imdb_id and content_type == "movie":
+        # --- Coroutine GuardaHD (film e serie TV con IMDB ID) ---
+        if imdb_id:
             guardahd_coro = resolve_guardahd(
-                imdb_id, content_label, content_type, addon_base_url
+                imdb_id, content_label, content_type, addon_base_url,
+                season=season, episode=episode,
             )
         else:
             async def _noop_guardahd():
-                return None
+                return []
             guardahd_coro = _noop_guardahd()
 
         # --- Lancia tutti e tre in parallelo ---
@@ -496,11 +497,13 @@ async def get_streams(
         elif isinstance(vidxgo_stream, dict):
             result["streams"].append(vidxgo_stream)
 
-        # GuardaHD
+        # GuardaHD (restituisce una lista di stream)
         if isinstance(guardahd_stream, Exception):
             logger.error(f"❌ GuardaHD exception: {guardahd_stream}")
-        elif isinstance(guardahd_stream, dict):
-            result["streams"].append(guardahd_stream)
+        elif isinstance(guardahd_stream, list):
+            for gs in guardahd_stream:
+                if isinstance(gs, dict):
+                    result["streams"].append(gs)
 
     except Exception as e:
         logger.error(f"❌ get_streams error: {e}")

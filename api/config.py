@@ -15,7 +15,7 @@ VIDXGO_DOMAIN  = os.getenv("VIDXGO_DOMAIN", "https://v.vidxgo.co")
 VIDXGO_ENABLED = os.getenv("VIDXGO_ENABLED", "1")   # imposta 0 per disabilitare
 
 # GuardaHD provider
-GHD_DOMAIN       = os.getenv("GHD_DOMAIN", "https://guardahd.stream").rstrip("/")
+GHD_DOMAIN       = os.getenv("GHD_DOMAIN", "https://mostraguarda.stream").rstrip("/")
 GUARDAHD_ENABLED = os.getenv("GUARDAHD_ENABLED", "1")  # imposta 0 per disabilitare
 
 # Base URL fisso per il proxy interno — OBBLIGATORIO se si usa GuardaHD o
