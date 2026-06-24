@@ -60,7 +60,7 @@ _HEADERS: dict = {
     "User-Agent": _UA,
 }
 
-_TIMEOUT = httpx.Timeout(20.0)
+_TIMEOUT = httpx.Timeout(10.0)
 
 _IFRAME_VIXCLOUD_RE = re.compile(
     r'<iframe[^>]+src=["\'](["\']*vixcloud[^"\']*)["\']',
@@ -68,39 +68,7 @@ _IFRAME_VIXCLOUD_RE = re.compile(
 )
 
 
-# ---------------------------------------------------------------------------
-# checkUrlExists (VixSrc)
-# ---------------------------------------------------------------------------
 
-async def check_url_exists(url: str) -> bool:
-    """Verifica tramite HEAD se un URL VixSrc esiste. Skip con VIXSRC_SKIP_LIST_CHECK=1."""
-    skip = os.getenv("VIXSRC_SKIP_LIST_CHECK", "").lower() in ("1", "true", "on", "yes", "y")
-    if skip:
-        logger.debug(f"[VixSrc][Check] skip attivo -> assumo esistente: {url}")
-        return True
-
-    head_headers = {
-        "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-        "Accept-Language": "it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7",
-        "Referer": "https://vixsrc.to/",
-        "Upgrade-Insecure-Requests": "1",
-    }
-
-    try:
-        async with httpx.AsyncClient(timeout=_TIMEOUT, follow_redirects=True) as client:
-            resp = await client.head(url, headers=head_headers)
-        if resp.status_code in range(200, 400):
-            logger.info(f"[VixSrc][Check] OK ({resp.status_code}) -> {url}")
-            return True
-        if resp.status_code == 404:
-            logger.info(f"[VixSrc][Check] 404 -> {url}")
-            return False
-        logger.warning(f"[VixSrc][Check] Status bloccato ({resp.status_code}), assumo esistente")
-        return True
-    except Exception as e:
-        logger.warning(f"[VixSrc][Check] errore rete per {url}: {e} -> assumo esistente")
-        return True
 
 
 # ---------------------------------------------------------------------------
@@ -375,11 +343,6 @@ async def _resolve_vixcloud(
 ) -> Optional[Dict]:
     """Wrapper async per VixSrc/VixCloud compatibile con asyncio.gather()."""
     try:
-        exists = await check_url_exists(page_url)
-        if not exists:
-            logger.warning(f"⚠️ Contenuto non trovato su VixSrc: {page_url}")
-            return None
-
         vixcloud_m3u8 = await extract_m3u8(page_url)
 
         if is_series and ep_title_task:

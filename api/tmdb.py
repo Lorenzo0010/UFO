@@ -2,6 +2,7 @@ import logging
 from typing import Optional, Tuple
 
 from curl_cffi.requests import AsyncSession
+from cachetools import TTLCache
 
 from .config import TMDB_API_KEY, USER_AGENT
 
@@ -11,10 +12,10 @@ logger = logging.getLogger(__name__)
 _session: Optional[AsyncSession] = None
 
 # Cache in-memory: chiave "(content_id, content_type)" → (TMDB ID, titolo)
-_tmdb_cache: dict[tuple[str, str], Optional[Tuple[int, str]]] = {}
+_tmdb_cache = TTLCache(maxsize=2000, ttl=86400)
 
 # Cache episodi: chiave "(tmdb_id, season, episode)" → titolo episodio
-_episode_cache: dict[tuple[int, str, str], Optional[str]] = {}
+_episode_cache = TTLCache(maxsize=5000, ttl=86400)
 
 
 def get_session() -> AsyncSession:

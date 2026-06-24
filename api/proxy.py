@@ -54,6 +54,7 @@ def get_client() -> httpx.AsyncClient:
             timeout=_TIMEOUT,
             follow_redirects=True,
             verify=False,  # CDN di terze parti (es. serversicuro.cc) possono avere cert non validi
+            limits=httpx.Limits(max_connections=500, max_keepalive_connections=100)
         )
     return _client
 
@@ -215,17 +216,22 @@ async def proxy_segment(url: str, request: Request, headers: str | None = None):
     effective_headers = _build_headers(custom_headers)
 
     try:
-        resp = await client.get(url, headers=effective_headers)
+        req = client.build_request("GET", url, headers=effective_headers)
+        resp = await client.send(req, stream=True)
 
         if resp.status_code not in (200, 206):
+            await resp.aclose()
             logger.warning(f"[proxy] segment HTTP {resp.status_code} per {url[:80]}")
             raise HTTPException(status_code=resp.status_code, detail="Upstream error")
 
         content_type = resp.headers.get("content-type", "video/MP2T")
-        body = resp.text
+        ct_lower = content_type.split(";")[0].strip().lower()
 
-        if _is_m3u8_content(content_type, body):
-            logger.debug(f"[proxy] sub-playlist rilevata, riscrittura: {url[:80]}")
+        if ct_lower in _M3U8_CONTENT_TYPES:
+            await resp.aread()
+            body = resp.text
+            await resp.aclose()
+            logger.debug(f"[proxy] sub-playlist rilevata dal content-type, riscrittura: {url[:80]}")
             rewritten = _rewrite_manifest(body, url, _proxy_base(request), headers)
             return Response(
                 content=rewritten,
@@ -233,11 +239,36 @@ async def proxy_segment(url: str, request: Request, headers: str | None = None):
                 headers={"Access-Control-Allow-Origin": "*", "Cache-Control": "no-cache"},
             )
 
-        async def stream_chunks():
-            yield resp.content
+        # Possibile che sia un M3U8 mascherato. Leggiamo il primo chunk per "sbirciare".
+        iterator = resp.aiter_bytes(chunk_size=8192)
+        try:
+            first_chunk = await iterator.__anext__()
+        except StopAsyncIteration:
+            first_chunk = b""
+
+        if first_chunk.lstrip().startswith(b"#EXTM3U"):
+            rest = await resp.aread()
+            body = (first_chunk + rest).decode('utf-8', errors='ignore')
+            await resp.aclose()
+            logger.debug(f"[proxy] sub-playlist mascherata rilevata, riscrittura: {url[:80]}")
+            rewritten = _rewrite_manifest(body, url, _proxy_base(request), headers)
+            return Response(
+                content=rewritten,
+                media_type="application/vnd.apple.mpegurl",
+                headers={"Access-Control-Allow-Origin": "*", "Cache-Control": "no-cache"},
+            )
+
+        async def stream_generator():
+            try:
+                if first_chunk:
+                    yield first_chunk
+                async for chunk in iterator:
+                    yield chunk
+            finally:
+                await resp.aclose()
 
         return StreamingResponse(
-            stream_chunks(),
+            stream_generator(),
             status_code=resp.status_code,
             media_type=content_type,
             headers={"Access-Control-Allow-Origin": "*", "Cache-Control": "no-cache"},
