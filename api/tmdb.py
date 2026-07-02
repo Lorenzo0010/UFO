@@ -77,8 +77,25 @@ async def get_tmdb_info(content_id: str, content_type: str) -> Tuple[Optional[in
                 tmdb_id = entry["id"]
                 title = entry.get("title") or entry.get("name") or ""
                 result = (tmdb_id, title)
+
+        # Fallback a Cinemeta se TMDB non trova risultati
+        if not result:
+            logger.info(f"Fallback Cinemeta per {content_id} ({content_type})...")
+            cinemeta_url = f"https://v3-cinemeta.strem.io/meta/{content_type}/{content_id}.json"
+            cr = await client.get(cinemeta_url)
+            if cr.status_code == 200:
+                cdata = cr.json()
+                meta = cdata.get("meta", {})
+                tmdb_id_str = meta.get("moviedb_id")
+                if tmdb_id_str:
+                    title = meta.get("name", "")
+                    try:
+                        result = (int(tmdb_id_str), title)
+                        logger.info(f"✅ Cinemeta ha trovato TMDB ID {tmdb_id_str} per {content_id}")
+                    except ValueError:
+                        pass
     except Exception as e:
-        logger.error(f"\u274c TMDb error: {e}")
+        logger.error(f"❌ TMDb/Cinemeta error: {e}")
 
     _tmdb_cache[cache_key] = result
     logger.debug(f"\U0001f4be Cache miss TMDB — salvato {content_id} \u2192 {result}")
