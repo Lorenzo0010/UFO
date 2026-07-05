@@ -223,32 +223,44 @@ Clicca **Deploy**. Koyeb avvierà il servizio.
 
 ## Deploy con Docker
 
-```bash
-# Build immagine
-docker build -t ufo-addon .
+Puoi utilizzare l'immagine pre-compilata pubblicata su GitHub Container Registry (GHCR), disponibile per architetture `amd64` e `arm64`.
 
-# Avvia il container
-docker run -d \
-  -p 8080:8080 \
-  -e TMDB_KEY=la_tua_api_key \
-  -e ADDON_BASE_URL=http://192.168.1.77:8080 \
-  --name ufo \
-  ufo-addon
+### Tramite Docker Compose (Consigliato)
+
+Crea un file `docker-compose.yml` (il progetto supporta nativamente CasaOS grazie ai metadati integrati):
+
+```yaml
+services:
+  ufo:
+    image: ghcr.io/lorenzo0010/ufo:latest
+    container_name: ufo
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      - TMDB_KEY=la_tua_api_key_tmdb
+      - ADDON_BASE_URL=http://192.168.1.77:8080
+      - VIDXGO_ENABLED=1
 ```
 
-Funziona su qualsiasi host con Docker: VPS, Orange Pi, Raspberry Pi, macchina locale.
+Avvialo con:
+```bash
+docker compose up -d
+```
 
-**Con tutte le opzioni:**
+### Tramite Docker CLI
 
 ```bash
 docker run -d \
   -p 8080:8080 \
-  -e TMDB_KEY=la_tua_api_key \
+  -e TMDB_KEY=la_tua_api_key_tmdb \
   -e ADDON_BASE_URL=http://192.168.1.77:8080 \
   -e VIDXGO_ENABLED=1 \
   --name ufo \
-  ufo-addon
+  ghcr.io/lorenzo0010/ufo:latest
 ```
+
+Funziona su qualsiasi host con Docker: VPS, CasaOS, Orange Pi, Raspberry Pi, macchina locale.
 
 ---
 

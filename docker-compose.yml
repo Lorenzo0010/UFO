@@ -1,0 +1,29 @@
+services:
+  ufo:
+    image: ghcr.io/lorenzo0010/ufo:latest
+    container_name: ufo
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      - TMDB_KEY=la_tua_api_key_tmdb
+      - ADDON_BASE_URL=http://192.168.1.77:8080
+      - VIDXGO_ENABLED=1
+
+x-casaos:
+  architectures:
+    - amd64
+    - arm64
+  main: ufo
+  description:
+    en: "Stremio Addon providing HLS streams from VixSrc/VixCloud and VidXgo via an internal HLS proxy."
+    it: "Addon Stremio che fornisce stream HLS da VixSrc/VixCloud e VidXgo tramite un proxy HLS interno."
+  store_app_id: ufo
+  title:
+    en: "UFO Stremio Addon"
+  tagline:
+    en: "HLS Proxy Addon for Stremio"
+    it: "Addon Proxy HLS per Stremio"
+  icon: "https://img.icons8.com/color/512/ufo.png"
+  index: "/"
+  port_map: "8080"
