@@ -1,9 +1,9 @@
-const axios = require('axios');
+const axios = typeof require !== 'undefined' ? (() => { try { return require('axios'); } catch(e) { return null; } })() : null;
 const fs = typeof require !== 'undefined' ? (() => { try { return require('fs'); } catch(e) { return null; } })() : null;
 const path = typeof require !== 'undefined' ? (() => { try { return require('path'); } catch(e) { return null; } })() : null;
 const { getClearance } = require('../../cf_bypass');
-const https = require('https');
-const http = require('http');
+const https = typeof require !== 'undefined' ? (() => { try { return require('https'); } catch(e) { return null; } })() : null;
+const http = typeof require !== 'undefined' ? (() => { try { return require('http'); } catch(e) { return null; } })() : null;
 
 // Connection pooling configuration
 const agentOptions = {
@@ -14,8 +14,8 @@ const agentOptions = {
     keepAliveMsecs: 30000
 };
 
-const httpsAgent = new https.Agent(agentOptions);
-const httpAgent = new http.Agent(agentOptions);
+const httpsAgent = https ? new https.Agent(agentOptions) : null;
+const httpAgent = http ? new http.Agent(agentOptions) : null;
 
 // In-memory cache for CF sessions to avoid disk I/O on every request
 const sessionCache = new Map();
@@ -146,7 +146,7 @@ async function smartFetch(url, domain, options = {}) {
         const startTime = Date.now();
         const requestTimeout = reqOptions.timeout ? reqOptions.timeout : (sess.userAgent ? 60000 : 30000);
         
-        const source = axios.CancelToken.source();
+        const source = axios ? axios.CancelToken.source() : { cancel: () => {}, token: null };
         
         let timeoutId;
         const timeoutPromise = new Promise((_, reject) => {
@@ -159,6 +159,25 @@ async function smartFetch(url, domain, options = {}) {
         });
 
         try {
+            if (!axios) {
+                // Fallback to native fetch for Nuvio client
+                const fetchPromise = fetch(targetUrl, {
+                    method: reqOptions.method || 'GET',
+                    headers: mergedHeaders,
+                    body: reqOptions.body
+                });
+                const response = await Promise.race([fetchPromise, timeoutPromise]);
+                clearTimeout(timeoutId);
+                const data = reqOptions.responseType === 'buffer' ? await response.arrayBuffer() : await response.text();
+                const responseUrl = response.url || targetUrl;
+                if (response.status >= 400 && response.status !== 403 && response.status !== 503) {
+                    const err = new Error(`HTTP ${response.status}`);
+                    err.response = { status: response.status, data, url: responseUrl };
+                    throw err;
+                }
+                return { data, status: response.status, headers: response.headers, url: responseUrl };
+            }
+
             const axiosPromise = axios({
                 url: targetUrl,
                 method: reqOptions.method || 'GET',
@@ -199,7 +218,7 @@ async function smartFetch(url, domain, options = {}) {
             return { data, status: response.status, headers: response.headers, url: responseUrl };
         } catch (e) {
             clearTimeout(timeoutId);
-            if (axios.isCancel(e) || e.code === 'ECONNABORTED') {
+            if ((axios && axios.isCancel && axios.isCancel(e)) || e.code === 'ECONNABORTED') {
                 const timeoutErr = new Error(`timeout of ${requestTimeout}ms exceeded`);
                 timeoutErr.code = 'ECONNABORTED';
                 throw timeoutErr;

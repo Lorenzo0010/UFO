@@ -32,7 +32,7 @@ async function build() {
                 platform: 'neutral',
                 target: ['es2016'],
                 format: 'cjs',
-                external: ['fs', 'path', 'https', 'http', 'url', 'crypto', 'undici', 'cheerio']
+                external: ['fs', 'path', 'https', 'http', 'url', 'crypto', 'undici', 'cheerio', 'axios']
             });
             console.log(`✅ Built ${provider}`);
         } catch (e) {
