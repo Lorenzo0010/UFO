@@ -1,7 +1,7 @@
-# 🛸 UFO — Stremio Addon
+﻿# 🛸 UFO — Stremio Addon & Nuvio Plugin
 
-> Addon Stremio che fornisce stream HLS da **VixSrc/VixCloud** e **VidXgo** tramite un **proxy HLS interno**.
-> Supporta il deploy su [Koyeb](https://koyeb.com) e tramite Docker.
+> Addon Stremio e Plugin Nuvio che fornisce stream HLS da **VixSrc/VixCloud**, **VidXgo** e **AltadefinizioneStreaming**.
+> Supporta il deploy server-side (Stremio) su Koyeb/Docker e il bundling client-side (Nuvio) tramite GitHub Actions.
 
 ---
 
@@ -13,8 +13,8 @@ L'autore non è responsabile di alcun utilizzo improprio, illegale o non autoriz
 Utilizzando questo progetto, l'utente accetta di assumersi la piena responsabilità delle proprie azioni e di rispettare le leggi vigenti nel proprio paese.
 
 - Questo addon **non ospita, non distribuisce e non indicizza** alcun contenuto multimediale
-- Funziona esclusivamente come **proxy di reindirizzamento** verso sorgenti di terze parti pubblicamente accessibili
-- L'autore **non ha alcun controllo** sui contenuti forniti da sorgenti esterne (VixSrc, VidXgo, TMDB)
+- Funziona esclusivamente come **proxy di reindirizzamento** o **scraper client-side** verso sorgenti di terze parti pubblicamente accessibili
+- L'autore **non ha alcun controllo** sui contenuti forniti da sorgenti esterne (VixSrc, VidXgo, TMDB, ecc.)
 - L'autore **non garantisce** la disponibilità, la legalità o la qualità dei contenuti raggiungibili tramite questo software
 - È responsabilità dell'utente verificare che l'utilizzo di questo software sia conforme alle leggi del proprio paese
 
@@ -29,343 +29,100 @@ Questo progetto nasce come studio pratico dei seguenti argomenti:
 - Sviluppo di API REST con **FastAPI** e Python asincrono
 - Integrazione con API di terze parti (**TMDB API**)
 - Architettura di addon per **Stremio** e il relativo protocollo
-- Proxy HLS interno (riscrittura manifest `.m3u8` e inoltro segmenti)
-- Deploy su piattaforma cloud moderna (**Koyeb**) e tramite **Docker**
-- Strutturazione di progetti Python in moduli riutilizzabili
+- Sviluppo di plugin **Nuvio** eseguiti client-side nel browser
+- Bundling di moduli Node.js tramite **esbuild**
+- Deploy su piattaforma cloud moderna (**Koyeb**) e pipeline **GitHub Actions**
+- Strutturazione di progetti multi-ambiente (Node.js + Python)
 
 ---
 
 ## Come funziona
 
-UFO aggrega stream da due provider in parallelo tramite un **proxy HLS interno** che riscrive i manifest e inoltra i segmenti video.
+UFO aggrega stream da tre provider in parallelo. Può essere utilizzato in due modalità:
 
-```
-Stremio
-  │
-  │  GET /stream/{type}/{id}.json
-  ▼
-api/index.py  ──►  api/resolver.py
-                        │
-                        │  asyncio.gather() ──────────────────────────────────┐
-                        │                                                      │
-                        ├── 1. VixSrc/VixCloud ─────────────────────────────┐ │
-                        │      a. Risolve IMDb → TMDB  (tmdb.py + cache)    │ │
-                        │      b. Chiama /api/movie|tv/<tmdb>                │ │
-                        │      c. Estrae URL embed VixCloud                  │ │
-                        │      d. Estrae token/expires/m3u8 dallo script     │ │
-                        │      e. Proxy HLS interno → Stremio                │ │
-                        │                                                     │ │
-                        └── 2. VidXgo ─────────────────────────────────────  │ │
-                                a. Usa IMDb ID diretto (no TMDB)              │ │
-                                b. Risolve URL embed e decritta script        │ │
-                                c. Estrae M3U8 e header di playback           │ │
-                                d. Proxy HLS interno → Stremio                │ │
-                                                                               │ │
-                   ┌───────────────────────────────────────────────────────────┘ │
-                   │                                                              │
-                   └──────────────────────────────────────────────────────────────┘
-                   ▼
-           api/proxy.py  ──►  /proxy/manifest.m3u8?url=<encoded>&headers=<b64>
-                               Riscrive URI nel manifest e inoltra segmenti
-                               Stremio riproduce
-```
+### 1. Modalità Addon Stremio (Server-Side)
+Il backend in Python orchestrato da FastAPI esegue il fetch dai provider direttamente dal server. Utilizza un **proxy HLS interno** che riscrive i manifest e inoltra i segmenti video per bypassare limitazioni CORS e blocchi regionali.
 
-### Proxy HLS interno
-
-Il proxy (`api/proxy.py`) agisce da intermediario tra Stremio e le sorgenti HLS:
-
-1. `GET /proxy/manifest.m3u8?url=<encoded>` — scarica il manifest e riscrive tutti gli URI (segmenti, chiavi, sotto-playlist) come URL proxy.
-2. `GET /proxy/segment?url=<encoded>` — rileva automaticamente se la risposta è un sotto-manifesto (anche senza `.m3u8` nell'URL) e lo riscrive, altrimenti inoltra il segmento direttamente.
-3. Gli header di playback necessari (Referer, User-Agent, Origin, ecc.) vengono propagati in ogni richiesta tramite il parametro `headers_b64`.
-
-> Per ambienti multi-client (es. Stremio desktop + mobile sullo stesso server), impostare **`ADDON_BASE_URL`** con l'URL pubblico del servizio; altrimenti viene usato `request.base_url` come fallback (funziona solo per client con lo stesso IP).
+### 2. Modalità Plugin Nuvio (Client-Side)
+Il codice Javascript contenuto in src/ viene analizzato e pacchettizzato tramite esbuild (grazie a uild.js) per generare moduli browser-compatibili caricati direttamente dal client Nuvio dell'utente (Smart TV, Telefono, PC).
+Le richieste vengono effettuate nativamente tramite l'API etch del dispositivo. Solo i provider con supporto nativo e senza blocchi Cloudflare restrittivi (VixCloud, VidXgo, AltadefinizioneStreaming) sono attivati per Nuvio.
 
 ---
 
 ## Struttura del progetto
 
-```
+`
 UFO/
-├── api/
-│   ├── __init__.py       # Rende api/ un package Python
-│   ├── index.py          # Entry point: app FastAPI, lifespan, route
-│   ├── config.py         # Env vars e validate_config()
-│   ├── tmdb.py           # Risoluzione IMDb → TMDB con cache in-memory e sessione condivisa
-│   ├── resolver.py       # Orchestrazione provider (VixSrc/VixCloud, VidXgo)
-│   ├── vidxgo.py         # Provider VidXgo (estrae M3U8 e usa proxy interno)
-│   └── proxy.py          # Proxy HLS interno (manifest + segmenti con header dinamici)
-├── Dockerfile            # Immagine Docker per deploy su VPS/Orange Pi/qualsiasi host
+├── api/                  # Backend Python per Stremio (FastAPI)
+├── src/                  # Sorgenti Javascript dei provider per Nuvio
+│   ├── altadefinizionestreaming/
+│   ├── vidxgo/
+│   ├── vixcloud/
+│   ├── extractors/
+│   └── utils/
+├── build.js              # Script esbuild per la pacchettizzazione Nuvio
+├── manifest.json         # Manifest principale del plugin Nuvio
+├── package.json          # Dipendenze Node.js (esbuild, crypto-js, ecc.)
+├── Dockerfile            # Immagine Docker per deploy Stremio su VPS
 ├── Procfile              # Avvio per Koyeb: uvicorn api.index:app --port $PORT
-├── requirements.txt      # Dipendenze con versioni pinnate
+├── requirements.txt      # Dipendenze Python
 └── README.md
-```
-
-### Descrizione moduli
-
-#### `api/config.py`
-Centralizza tutta la configurazione. Le variabili sensibili (`TMDB_KEY`) non hanno valori di default. `validate_config()` viene chiamata al lifespan di FastAPI e logga warning per ogni variabile obbligatoria mancante, oltre a info sullo stato delle variabili opzionali.
-
-#### `api/tmdb.py`
-Risolve IMDb ID → TMDB ID con **cache in-memory** e **sessione HTTP condivisa** (`AsyncSession` creata una volta sola e riutilizzata). La cache evita chiamate duplicate per lo stesso contenuto durante la sessione.
-
-#### `api/resolver.py`
-Orchestratore principale. Lancia i due provider in parallelo con `asyncio.gather()` e aggrega tutti gli stream validi nel risultato restituito a Stremio.
-
-#### `api/vidxgo.py`
-Provider VidXgo. Usa l'IMDb ID direttamente (non richiede TMDB). Estrae nativamente l'URL M3U8 decrittando il payload della pagina embed e usa il proxy interno passando gli header di playback necessari (Referer, User-Agent, Origin).
-
-#### `api/proxy.py`
-Proxy HLS interno. Espone due route (`/proxy/manifest.m3u8` e `/proxy/segment`) e riscrive ogni URI nei manifest per passare per il proxy stesso, propagando gli header originali tramite `headers`.
-
-#### `api/index.py`
-Entry point FastAPI. Il `lifespan` esegue `validate_config()` all'avvio e chiude le sessioni HTTP allo shutdown.
-
-| Route | Funzione |
-|---|---|
-| `GET /` | Status check + link al manifest |
-| `GET /manifest.json` | Manifest Stremio |
-| `GET /stream/{type}/{id}.json` | **Route principale** |
-| `GET /meta/{type}/{id}.json` | Metadati stub |
-| `GET /catalog/{type}/{id}.json` | Catalogo vuoto |
-| `GET /proxy/manifest.m3u8` | Proxy HLS — manifest |
-| `GET /proxy/segment` | Proxy HLS — segmenti |
-
-#### `Dockerfile`
-Immagine basata su `python:3.12-slim`. Copia prima `requirements.txt` per sfruttare la cache layer di Docker, poi il codice sorgente. Porta esposta: `8080`.
-
-#### `Procfile`
-```
-web: uvicorn api.index:app --host 0.0.0.0 --port $PORT
-```
-
-#### `requirements.txt`
-| Pacchetto | Versione | Utilizzo |
-|---|---|---|
-| `fastapi` | 0.115.12 | Framework web REST |
-| `uvicorn` | 0.34.0 | Server ASGI |
-| `httpx` | 0.27.0 | Client HTTP asincrono |
-| `curl_cffi` | 0.14.0 | Client HTTP con fingerprint browser |
-| `python-dotenv` | 1.1.0 | Caricamento `.env` in locale |
-| `beautifulsoup4` | 4.13.4 | Parsing HTML |
-| `lxml` | 5.3.1 | Parser XML/HTML |
-| `cachetools` | 5.3.3 | Cache in-memory |
+`
 
 ---
 
-## 🔧 Variabili d'ambiente
+## Sviluppo Plugin Nuvio
 
-### Obbligatorie
+### Costruzione Locale
+Assicurati di avere Node.js installato.
+`ash
+npm install
+npm run build
+`
+Questo genererà la cartella providers/ contenente il codice pronto per Nuvio.
 
-| Variabile | Descrizione |
-|---|---|
-| `TMDB_KEY` | API key TMDB personale (gratuita su [themoviedb.org](https://www.themoviedb.org/settings/api)) |
-
-### Consigliate
-
-| Variabile | Default | Descrizione |
-|---|---|---|
-| `ADDON_BASE_URL` | *(vuoto)* | URL pubblico fisso del servizio (es. `https://mio-addon.koyeb.app`). **Necessario** per ambienti multi-client (Stremio desktop + mobile sullo stesso server). Se non impostato, viene usato `request.base_url` come fallback (funziona solo se tutti i client hanno lo stesso IP). |
-
-### Provider
-
-| Variabile | Default | Descrizione |
-|---|---|---|
-| `SC_DOMAIN` | `https://vixsrc.to` | Dominio VixSrc alternativo |
-| `VIDXGO_DOMAIN` | `https://v.vidxgo.co` | Dominio VidXgo alternativo |
-| `VIDXGO_ENABLED` | `1` | Abilita il provider VidXgo. Impostare `0` per disabilitarlo |
-
-### HTTP
-
-| Variabile | Default | Descrizione |
-|---|---|---|
-| `USER_AGENT` | `Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:131.0)…` | User-Agent HTTP personalizzato per le richieste verso i provider |
+### GitHub Actions
+Il repository è configurato per compilare automaticamente i provider ad ogni push sul branch main.
+Nuvio andrà a leggere direttamente i file compilati dalla cartella providers/ esposta tramite GitHub Pages o Raw.
 
 ---
 
-## Prerequisiti
+## Sviluppo Addon Stremio
 
-- Una **TMDB API Key** personale (gratuita su [themoviedb.org](https://www.themoviedb.org/settings/api))
-- **Docker** (opzionale, per deploy non-Koyeb)
-
----
-
-## Deploy su Koyeb
-
-### 1. Connetti il repo
-
-Connetti il repository su [Koyeb](https://app.koyeb.com) tramite **GitHub**.
-
-### 2. Configurazione servizio
-
-| Campo | Valore |
-|---|---|
-| **Builder** | Buildpack |
-| **Run command** | (lasciato vuoto, utilizza il `Procfile`) |
-| **Port** | `8000` / `8080` (A seconda delle impostazioni) |
-
-Koyeb legge automaticamente il `Procfile` e inietta la variabile d'ambiente `$PORT`.
-
-### 3. Variabili d'ambiente
-
-| Variabile | Obbligatoria | Descrizione |
-|---|---|---|
-| `TMDB_KEY` | ✅ Sì | API key TMDB personale |
-| `ADDON_BASE_URL` | ⚠️ Consigliata | URL pubblico del servizio Koyeb (es. `https://mio-addon.koyeb.app`) |
-| `VIDXGO_ENABLED` | ❌ No | `0` per disabilitare VidXgo (default: abilitato) |
-| `SC_DOMAIN` | ❌ No | Dominio VixSrc alternativo |
-| `USER_AGENT` | ❌ No | User-Agent HTTP personalizzato |
-
-### 4. Deploy
-
-Clicca **Deploy**. Koyeb avvierà il servizio.
-
----
-
-## Deploy con Docker
-
-Puoi utilizzare l'immagine pre-compilata pubblicata su GitHub Container Registry (GHCR), disponibile per architetture `amd64` e `arm64`.
-
-### Tramite Docker Compose (Consigliato)
-
-Crea un file `docker-compose.yml` (il progetto supporta nativamente CasaOS grazie ai metadati integrati):
-
-```yaml
-services:
-  ufo:
-    image: ghcr.io/lorenzo0010/ufo:latest
-    container_name: ufo
-    restart: unless-stopped
-    ports:
-      - "8080:8080"
-    environment:
-      - TMDB_KEY=la_tua_api_key_tmdb
-      - ADDON_BASE_URL=http://192.168.1.77:8080
-      - VIDXGO_ENABLED=1
-```
-
-Avvialo con:
-```bash
-docker compose up -d
-```
-
-### Tramite Docker CLI
-
-```bash
-docker run -d \
-  -p 8080:8080 \
-  -e TMDB_KEY=la_tua_api_key_tmdb \
-  -e ADDON_BASE_URL=http://192.168.1.77:8080 \
-  -e VIDXGO_ENABLED=1 \
-  --name ufo \
-  ghcr.io/lorenzo0010/ufo:latest
-```
-
-Funziona su qualsiasi host con Docker: VPS, CasaOS, Orange Pi, Raspberry Pi, macchina locale.
-
----
-
-## Aggiungere l'addon a Stremio
-
-Apri nel browser l'URL del servizio. La risposta mostrerà il link al manifest:
-
-```json
-{
-  "status": "online",
-  "addon": "UFO addon",
-  "proxy": "internal",
-  "manifest": "https://<tuo-servizio>/manifest.json"
-}
-```
-
-Incolla il link manifest in Stremio → **Addon** → **Aggiungi addon tramite URL**.
-
----
-
-## Sviluppo locale
-
-```bash
-# Installa dipendenze
+`ash
+# Installa dipendenze Python
 pip install -r requirements.txt
 
 # Crea il file .env
-cp .env.example .env  # oppure crea manualmente
+cp .env.example .env
 
 # Avvia il server
 uvicorn api.index:app --reload --port 8080
-```
-
-**Esempio `.env`:**
-```env
-TMDB_KEY=la_tua_api_key_tmdb
-ADDON_BASE_URL=http://localhost:8080
-
-# Provider (opzionali — abilitati di default)
-# VIDXGO_ENABLED=1
-
-# Avanzate
-# SC_DOMAIN=https://vixsrc.to
-# VIDXGO_DOMAIN=https://v.vidxgo.co
-# USER_AGENT=Mozilla/5.0 ...
-```
-
----
-
-## Endpoint disponibili
-
-| Metodo | Path | Descrizione |
-|---|---|---|
-| `GET` | `/` | Status e link al manifest |
-| `GET` | `/manifest.json` | Manifest Stremio |
-| `GET` | `/stream/{type}/{id}.json` | Risoluzione stream (tutti i provider) |
-| `GET` | `/meta/{type}/{id}.json` | Metadati (stub) |
-| `GET` | `/catalog/{type}/{id}.json` | Catalogo (vuoto) |
-| `GET` | `/proxy/manifest.m3u8` | Proxy HLS — manifest |
-| `GET` | `/proxy/segment` | Proxy HLS — segmenti |
-
----
-
-## Licenza
-
-MIT License — vedi file [LICENSE](LICENSE) per i dettagli.
-
-Il software viene fornito **"as is"**, senza garanzie di alcun tipo.
-L'autore non è responsabile per danni derivanti dall'uso di questo software.
+`
 
 ---
 
 ## 📋 Changelog
 
+### [2.0.0] — 2026-07
+> Dual-Support Nuvio e Pulizia Provider
+
+- **feat**: Aggiunto supporto nativo al plugin **Nuvio**, con esecuzione client-side nel browser.
+- **feat**: Pipeline esbuild (uild.js) e package.json integrati per raggruppare i file JS.
+- **feat**: Aggiunta la CI/CD via GitHub Actions per pacchettizzare il codice su ogni push.
+- **refactor**: Eliminati i provider bloccati da Cloudflare o non compatibili nativamente (Guardoserie, AnimeUnity, AnimeSaturn, NetMirror, ecc.).
+- **refactor**: Mantenuti e stabilizzati i tre provider autonomi primari: **VixCloud, VidXgo e AltadefinizioneStreaming**.
+- **fix**: Sostituiti moduli Node.js-only (xios, s, https) con un fallback sicuro nativo (etch) per il client browser.
+- **chore**: Riordinata la lista dei provider nel manifest.json.
+
 ### [1.7.0] — 2026-06
 > Rimozione EasyProxy, Fix Proxy e Porting
 
-- **refactor**: rimossa completamente la dipendenza da EasyProxy. Il proxy HLS interno ora gestisce in autonomia sia VixCloud che VidXgo passando header dinamici (`headers_b64`) per i segmenti.
-- **refactor**: rimosso il controllo HEAD su VixSrc e la relativa variabile `VIXSRC_SKIP_LIST_CHECK`.
-- **fix**: aggiornato `Dockerfile` per esporre la porta `8080` e `Procfile` per l'uso di `$PORT`, massimizzando la compatibilità di deploy.
-- **chore**: aggiornati `requirements.txt` con le librerie in uso (`httpx`, `cachetools`).
+- **refactor**: rimossa completamente la dipendenza da EasyProxy per Stremio.
+- **fix**: aggiornato Dockerfile per esporre la porta 8080.
 
 ### [1.6.0] — 2026-06
 > Proxy HLS interno e VidXgo
 
-- **feat**: proxy HLS interno (`api/proxy.py`) — riscrive manifest e inoltra segmenti; EasyProxy non è più necessario per VixSrc
-- **feat**: aggiunto provider **VidXgo** (`api/vidxgo.py`) — usa IMDb ID diretto
-- **feat**: entrambi i provider vengono eseguiti in parallelo con `asyncio.gather()`; tutti gli stream validi vengono restituiti insieme
-- **feat**: aggiunta variabile `ADDON_BASE_URL` per ambienti multi-client
-
-### [1.5.0] — 2026-04-13
-> Rimozione ADDON_PATH
-
-- **refactor**: rimossa la variabile d'ambiente `ADDON_PATH` — le route sono ora servite direttamente alla radice (`/manifest.json`, `/stream/...`, ecc.)
-- Su Koyeb ogni deploy ha già il proprio dominio dedicato, quindi il prefisso dinamico era ridondante
-- **bump**: versione manifest aggiornata a `1.5.0`
-
-### [1.4.1] — 2026-04-13
-> Porta aggiornata a 8000 per compatibilità Koyeb
-
-- **fix**: porta aggiornata da `8080` a `8000` in README, `Procfile`, `Dockerfile` e negli esempi Docker/sviluppo locale
-
-### [1.4.0] — 2026-04-13
-> Sicurezza, performance e infrastruttura
-
-- **security**: rimosso il valore di fallback hardcodato della TMDB API key — la variabile `TMDB_KEY` è ora obbligatoria
-- **perf**: aggiunta cache in-memory per le risoluzioni IMDb → TMDB; aggiunta sessione HTTP condivisa
-- **chore**: dipendenze pinnate in `requirements.txt`; aggiunto `Dockerfile`
+- **feat**: proxy HLS interno (pi/proxy.py).
+- **feat**: aggiunto provider VidXgo (pi/vidxgo.py).
