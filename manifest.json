@@ -1,137 +1,88 @@
 {
-  "name": "UFO (Nuvio)",
-  "version": "1.0.0",
-  "description": "Provider VixCloud, VidXgo e EasyStreams per Nuvio",
-  "scrapers": [
-    {
-      "id": "ufo-vidxgo",
-      "name": "VidXgo",
-      "version": "1.0.0",
-      "description": "Film e Serie TV da VidXgo",
-      "resources": ["stream"],
-      "contentLanguage": ["it"],
-      "formats": ["mp4", "m3u8"],
-      "idPrefixes": ["tmdb:", "tt"],
-      "filename": "providers/vidxgo.js",
-      "supportedTypes": ["movie", "tv", "series"],
-      "enabled": true
-    },
-    {
-      "id": "ufo-vixcloud",
-      "name": "VixCloud",
-      "version": "1.0.0",
-      "description": "Film e Serie TV da VixCloud (StreamingCommunity)",
-      "resources": ["stream"],
-      "contentLanguage": ["it"],
-      "formats": ["mp4", "m3u8"],
-      "idPrefixes": ["tmdb:", "tt"],
-      "filename": "providers/vixcloud.js",
-      "supportedTypes": ["movie", "tv", "series"],
-      "enabled": true
-    },
-    {
-      "id": "ufo-guardoserie",
-      "name": "Guardoserie",
-      "version": "1.1.26",
-      "description": "Movies and Series from Guardoserie",
-      "resources": ["stream"],
-      "contentLanguage": ["it"],
-      "formats": ["mp4", "m3u8"],
-      "idPrefixes": ["tmdb:", "tt"],
-      "filename": "providers/guardoserie.js",
-      "supportedTypes": ["movie", "tv", "series"],
-      "enabled": true
-    },
-    {
-      "id": "ufo-guardahd",
-      "name": "GuardaHD",
-      "version": "1.1.20",
-      "description": "Movies from GuardaHD",
-      "resources": ["stream"],
-      "contentLanguage": ["it"],
-      "formats": ["mp4", "m3u8"],
-      "idPrefixes": ["tmdb:", "tt"],
-      "filename": "providers/guardahd.js",
-      "supportedTypes": ["movie", "series"],
-      "enabled": true
-    },
-    {
-      "id": "ufo-animeunity",
-      "name": "AnimeUnity",
-      "version": "1.1.14",
-      "description": "Anime from AnimeUnity",
-      "resources": ["stream"],
-      "contentLanguage": ["it"],
-      "formats": ["mp4", "m3u8"],
-      "idPrefixes": ["kitsu:", "tmdb:", "tt"],
-      "filename": "providers/animeunity.js",
-      "supportedTypes": ["tv", "anime", "movie", "series"],
-      "enabled": true
-    },
-    {
-      "id": "ufo-animeworld",
-      "name": "AnimeWorld",
-      "version": "1.1.11",
-      "description": "Anime from AnimeWorld",
-      "resources": ["stream"],
-      "contentLanguage": ["it"],
-      "formats": ["mp4", "m3u8"],
-      "idPrefixes": ["kitsu:", "tmdb:", "tt"],
-      "filename": "providers/animeworld.js",
-      "supportedTypes": ["tv", "anime", "movie", "series"],
-      "enabled": true
-    },
-    {
-      "id": "ufo-animesaturn",
-      "name": "AnimeSaturn",
-      "version": "1.0.13",
-      "description": "Anime from AnimeSaturn",
-      "resources": ["stream"],
-      "contentLanguage": ["it"],
-      "formats": ["mp4", "m3u8"],
-      "idPrefixes": ["kitsu:", "tmdb:", "tt"],
-      "filename": "providers/animesaturn.js",
-      "supportedTypes": ["tv", "anime", "movie", "series"],
-      "enabled": true
-    },
-    {
-      "id": "ufo-cinemacity",
-      "name": "CinemaCity",
-      "version": "1.0.38",
-      "description": "Movies and Series from CinemaCity",
-      "resources": ["stream"],
-      "contentLanguage": ["it"],
-      "formats": ["mp4", "m3u8"],
-      "idPrefixes": ["tmdb:", "tt"],
-      "filename": "providers/cinemacity.js",
-      "supportedTypes": ["movie", "tv", "series"],
-      "enabled": true
-    },
-    {
-      "id": "ufo-altadefinizionestreaming",
-      "name": "AltadefinizioneStreaming",
-      "version": "1.0.7",
-      "description": "Movies and Series from AltadefinizioneStreaming",
-      "resources": ["stream"],
-      "contentLanguage": ["it"],
-      "formats": ["mp4", "m3u8"],
-      "idPrefixes": ["tmdb:", "tt"],
-      "filename": "providers/altadefinizionestreaming.js",
-      "supportedTypes": ["movie", "tv", "series"],
-      "enabled": true
-    },
-    {
-      "id": "ufo-netmirror",
-      "name": "NetMirror",
-      "version": "1.0.0",
-      "description": "Movies and Series from NetMirror",
-      "resources": ["stream"],
-      "contentLanguage": ["it"],
-      "formats": ["m3u8"],
-      "idPrefixes": ["tmdb:", "tt"],
-      "filename": "providers/netmirror.js",
-      "supportedTypes": ["movie", "tv", "series"],
-      "enabled": true
-    }
-  ]
+    "name":  "UFO (Nuvio)",
+    "version":  "1.0.0",
+    "description":  "Provider VixCloud, VidXgo e EasyStreams per Nuvio",
+    "scrapers":  [
+                     {
+                         "id":  "ufo-vixcloud",
+                         "name":  "VixCloud",
+                         "version":  "1.0.0",
+                         "description":  "Film e Serie TV da VixCloud (StreamingCommunity)",
+                         "resources":  [
+                                           "stream"
+                                       ],
+                         "contentLanguage":  [
+                                                 "it"
+                                             ],
+                         "formats":  [
+                                         "mp4",
+                                         "m3u8"
+                                     ],
+                         "idPrefixes":  [
+                                            "tmdb:",
+                                            "tt"
+                                        ],
+                         "filename":  "providers/vixcloud.js",
+                         "supportedTypes":  [
+                                                "movie",
+                                                "tv",
+                                                "series"
+                                            ],
+                         "enabled":  true
+                     },
+                     {
+                         "id":  "ufo-vidxgo",
+                         "name":  "VidXgo",
+                         "version":  "1.0.0",
+                         "description":  "Film e Serie TV da VidXgo",
+                         "resources":  [
+                                           "stream"
+                                       ],
+                         "contentLanguage":  [
+                                                 "it"
+                                             ],
+                         "formats":  [
+                                         "mp4",
+                                         "m3u8"
+                                     ],
+                         "idPrefixes":  [
+                                            "tmdb:",
+                                            "tt"
+                                        ],
+                         "filename":  "providers/vidxgo.js",
+                         "supportedTypes":  [
+                                                "movie",
+                                                "tv",
+                                                "series"
+                                            ],
+                         "enabled":  true
+                     },
+                     {
+                         "id":  "ufo-altadefinizionestreaming",
+                         "name":  "AltadefinizioneStreaming",
+                         "version":  "1.0.7",
+                         "description":  "Movies and Series from AltadefinizioneStreaming",
+                         "resources":  [
+                                           "stream"
+                                       ],
+                         "contentLanguage":  [
+                                                 "it"
+                                             ],
+                         "formats":  [
+                                         "mp4",
+                                         "m3u8"
+                                     ],
+                         "idPrefixes":  [
+                                            "tmdb:",
+                                            "tt"
+                                        ],
+                         "filename":  "providers/altadefinizionestreaming.js",
+                         "supportedTypes":  [
+                                                "movie",
+                                                "tv",
+                                                "series"
+                                            ],
+                         "enabled":  true
+                     }
+                 ]
 }
