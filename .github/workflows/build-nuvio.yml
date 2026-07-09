@@ -1,0 +1,40 @@
+name: Build Nuvio Plugin
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'src/**'
+      - 'package.json'
+      - 'build.js'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Build Nuvio Providers
+        run: npm run build
+
+      - name: Commit built providers
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add providers/
+          git commit -m "Auto-build Nuvio providers" || echo "No changes to commit"
+          git push

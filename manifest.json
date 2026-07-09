@@ -1,0 +1,33 @@
+{
+  "name": "UFO (Nuvio)",
+  "version": "1.0.0",
+  "description": "Provider VixCloud e VidXgo per Nuvio (port di UFO)",
+  "scrapers": [
+    {
+      "id": "ufo-vidxgo",
+      "name": "VidXgo",
+      "version": "1.0.0",
+      "description": "Film e Serie TV da VidXgo",
+      "resources": ["stream"],
+      "contentLanguage": ["it"],
+      "formats": ["mp4", "m3u8"],
+      "idPrefixes": ["tmdb:", "tt"],
+      "filename": "providers/vidxgo.js",
+      "supportedTypes": ["movie", "tv", "series"],
+      "enabled": true
+    },
+    {
+      "id": "ufo-vixcloud",
+      "name": "VixCloud",
+      "version": "1.0.0",
+      "description": "Film e Serie TV da VixCloud (StreamingCommunity)",
+      "resources": ["stream"],
+      "contentLanguage": ["it"],
+      "formats": ["mp4", "m3u8"],
+      "idPrefixes": ["tmdb:", "tt"],
+      "filename": "providers/vixcloud.js",
+      "supportedTypes": ["movie", "tv", "series"],
+      "enabled": true
+    }
+  ]
+}
