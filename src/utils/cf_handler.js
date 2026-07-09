@@ -1,6 +1,6 @@
 const axios = require('axios');
-const fs = require('fs');
-const path = require('path');
+const fs = typeof require !== 'undefined' ? (() => { try { return require('fs'); } catch(e) { return null; } })() : null;
+const path = typeof require !== 'undefined' ? (() => { try { return require('path'); } catch(e) { return null; } })() : null;
 const { getClearance } = require('../../cf_bypass');
 const https = require('https');
 const http = require('http');

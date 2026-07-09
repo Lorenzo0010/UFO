@@ -368,10 +368,10 @@ if (!IS_SERVER) {
 
         // Controlla se esiste una sessione CF caricabile (la validità effettiva sarà verificata dinamicamente dalle risposte HTTP)
         const sessionFile = `${(typeof process !== 'undefined' && typeof process.cwd === 'function' ? process.cwd() : '')}/cf-session-guardoserie.json`;
-        const fs = require('fs');
+        const fs = typeof require !== 'undefined' ? (() => { try { return require('fs'); } catch(e) { return null; } })() : null;
         let isSessionValid = false;
 
-        if (fs.existsSync(sessionFile)) {
+        if (fs && fs.existsSync(sessionFile)) {
             try {
                 const data = JSON.parse(fs.readFileSync(sessionFile, 'utf8'));
                 if (data && data.userAgent && data.cookies) {
