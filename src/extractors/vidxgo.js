@@ -16,12 +16,21 @@ const VIDXGO_HEADERS = {
 };
 
 function xorDecrypt(b64, key) {
-  const decoded = Buffer.from(b64, 'base64');
-  const result = Buffer.alloc(decoded.length);
-  for (let i = 0; i < decoded.length; i++) {
-    result[i] = decoded[i] ^ key.charCodeAt(i % key.length);
+  let decodedStr;
+  if (typeof atob === 'function') {
+    decodedStr = atob(b64);
+  } else {
+    decodedStr = Buffer.from(b64, 'base64').toString('binary');
   }
-  return result.toString('utf-8');
+  let result = '';
+  for (let i = 0; i < decodedStr.length; i++) {
+    result += String.fromCharCode(decodedStr.charCodeAt(i) ^ key.charCodeAt(i % key.length));
+  }
+  try {
+    return decodeURIComponent(escape(result));
+  } catch (e) {
+    return result;
+  }
 }
 
 const XOR_PATTERN = /var\s+\w+\s*=\s*'([\w]+)'\s*,?\s*d\s*=\s*atob\s*\(\s*'([A-Za-z0-9+/=]+)'\s*\)/g;
