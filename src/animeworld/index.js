@@ -1,6 +1,6 @@
 "use strict";
 
-const { formatStream } = require("../formatter.js");
+const { formatStream, sortStreams } = require('../formatter');;
 const { checkQualityFromPlaylist } = require("../quality_helper.js");
 const { createTimeoutSignal } = require("../fetch_helper.js");
 
@@ -1057,4 +1057,5 @@ async function getStreams(id, type, season, episode, providerContext = null) {
   }
 }
 
-module.exports = { getStreams };
+module.exports = { getStreams: async (...args) => sortStreams(await getStreams(...args)) };
+

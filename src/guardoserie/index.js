@@ -1,4 +1,4 @@
-const { formatStream } = require('../formatter');
+const { formatStream, sortStreams } = require('../formatter');;
 const { checkQualityFromPlaylist } = require('../quality_helper');
 
 // Rilevamento ambiente: Server (Node) o Client (Nuvio/React Native)
@@ -719,5 +719,6 @@ if (!IS_SERVER) {
         return nestedStreams.flat().filter(Boolean);
     }
 
-    module.exports = { getStreams };
+    module.exports = { getStreams: async (...args) => sortStreams(await getStreams(...args)) };
 }
+

@@ -27,7 +27,7 @@ const USER_AGENT = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, l
 const { extractMixDrop } = require('../extractors/mixdrop');
 const { extractStreamHG } = require('../extractors/streamhg');
 require('../fetch_helper.js');
-const { formatStream } = require('../formatter.js');
+const { formatStream, sortStreams } = require('../formatter');;
 const { checkQualityFromPlaylist, getQualityFromUrl } = require('../quality_helper.js');
 
 function getQualityFromName(qualityStr) {
@@ -261,4 +261,5 @@ function getStreams(id, type, season, episode) {
     }
   });
 }
-module.exports = { getStreams };
+module.exports = { getStreams: async (...args) => sortStreams(await getStreams(...args)) };
+

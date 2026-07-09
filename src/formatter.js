@@ -205,4 +205,24 @@ function formatStream(stream, providerName) {
     };
 }
 
-module.exports = { formatStream };
+function sortStreams(streams) {
+    if (!Array.isArray(streams)) return streams;
+    
+    const getQualityScore = (s) => {
+        const title = String(s.title || '').toLowerCase();
+        const qualityTag = String(s.qualityTag || s.quality || '').toLowerCase();
+        const combined = title + ' ' + qualityTag;
+        
+        if (combined.includes('4k') || combined.includes('2160p')) return 5;
+        if (combined.includes('qhd') || combined.includes('1440p')) return 4;
+        if (combined.includes('1080p') || combined.includes('fhd')) return 3;
+        if (combined.includes('720p') || combined.includes('hd')) return 2;
+        if (combined.includes('480p') || combined.includes('360p') || combined.includes('240p') || combined.includes('low quality') || combined.includes('sd')) return 1;
+        
+        return 0; // Unknown
+    };
+    
+    return [...streams].sort((a, b) => getQualityScore(b) - getQualityScore(a));
+}
+
+module.exports = { formatStream, sortStreams };

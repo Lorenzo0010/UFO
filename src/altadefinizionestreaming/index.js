@@ -5,7 +5,7 @@ const USER_AGENT = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, l
 const SESSION_COOKIE = 'sid=32234dfabd14e587764e84405e75e99856c6bef31c6b1752e19897b8ae3d4a21';
 
 const { extractMixDrop } = require('../extractors/mixdrop');
-const { formatStream } = require('../formatter.js');
+const { formatStream, sortStreams } = require('../formatter');;
 const { checkQualityFromPlaylist, checkItalianAudioInPlaylist } = require('../quality_helper.js');
 
 function getCookie() {
@@ -183,4 +183,5 @@ async function getStreams(id, type, season, episode, providerContext = null) {
   return streams.map(s => formatStream(s, "AltadefinizioneStreaming")).filter(Boolean);
 }
 
-module.exports = { getStreams };
+module.exports = { getStreams: async (...args) => sortStreams(await getStreams(...args)) };
+

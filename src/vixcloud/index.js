@@ -2,7 +2,7 @@ function getStreamingCommunityBaseUrl() {
   return "https://unitv.mom";
 }
 
-const { formatStream } = require('../formatter.js');
+const { formatStream, sortStreams } = require('../formatter');;
 require('../fetch_helper.js');
 const { checkQualityFromText } = require('../quality_helper.js');
 
@@ -360,4 +360,5 @@ async function getStreams(id, type, season, episode, providerContext = null) {
   }
 }
 
-module.exports = { getStreams };
+module.exports = { getStreams: async (...args) => sortStreams(await getStreams(...args)) };
+

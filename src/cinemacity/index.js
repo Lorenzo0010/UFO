@@ -1,6 +1,6 @@
 "use strict";
 
-const { formatStream } = require('../formatter.js');
+const { formatStream, sortStreams } = require('../formatter');;
 const { fetchWithTimeout } = require('../fetch_helper.js');
 
 const BASE64_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=";
@@ -732,4 +732,5 @@ async function getStreams(id, type, season, episode, providerContext = null) {
     }
 }
 
-module.exports = { getStreams };
+module.exports = { getStreams: async (...args) => sortStreams(await getStreams(...args)) };
+

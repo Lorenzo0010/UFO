@@ -1,5 +1,5 @@
 const IS_SERVER = true;
-const { formatStream } = require('../formatter.js');
+const { formatStream, sortStreams } = require('../formatter');;
 
 if (!IS_SERVER) {
   module.exports = {
@@ -341,5 +341,6 @@ if (!IS_SERVER) {
       }
     });
   }
-  module.exports = { getStreams };
+  module.exports = { getStreams: async (...args) => sortStreams(await getStreams(...args)) };
 }
+

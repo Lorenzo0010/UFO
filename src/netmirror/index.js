@@ -1,6 +1,6 @@
 const { fetchWithTimeout } = require('../fetch_helper.js');
 const { checkQualityFromText } = require('../quality_helper.js');
-const { formatStream } = require('../formatter.js');
+const { formatStream, sortStreams } = require('../formatter');;
 
 const TMDB_API_KEY = '68e094699525b18a70bab2f86b1fa706';
 const TMDB_BASE_URL = 'https://api.themoviedb.org/3';
@@ -287,4 +287,5 @@ async function getStreams(id, type, season, episode, providerContext = null) {
     }
 }
 
-module.exports = { getStreams };
+module.exports = { getStreams: async (...args) => sortStreams(await getStreams(...args)) };
+
