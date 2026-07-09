@@ -1,4 +1,4 @@
-const IS_SERVER = typeof process !== 'undefined' && process.versions && process.versions.node;
+const IS_SERVER = true;
 const { formatStream } = require('../formatter.js');
 
 if (!IS_SERVER) {
