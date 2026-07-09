@@ -9,6 +9,8 @@
   "dependencies": {
     "esbuild": "^0.20.1",
     "cheerio": "^1.0.0-rc.12",
-    "undici": "^6.11.1"
+    "undici": "^6.11.1",
+    "crypto-js": "^4.2.0",
+    "axios": "^1.6.0"
   }
 }

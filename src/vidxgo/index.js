@@ -96,7 +96,7 @@ if (!IS_SERVER) {
   const { extractVidxGo } = require('../extractors/vidxgo');
   require('../fetch_helper.js');
   const { checkQualityFromPlaylist, checkItalianAudioInPlaylist } = require('../quality_helper.js');
-  const STEP_BENCH_ENABLED = String((typeof process !== 'undefined' && process.env && process.env.PROVIDER_STEP_BENCH) || "").trim().toLowerCase() === "1";
+  const STEP_BENCH_ENABLED = String((typeof process !== 'undefined' && process.env && (typeof process !== 'undefined' && process.env ? process.env.PROVIDER_STEP_BENCH : '')) || "").trim().toLowerCase() === "1";
 
   function getQualityFromName(qualityStr) {
     if (!qualityStr) return 'Unknown';

@@ -10,7 +10,7 @@ async function build() {
         fs.mkdirSync(PROVIDERS_DIR);
     }
 
-    const providers = ['vidxgo', 'vixcloud'];
+    const providers = ['vidxgo', 'vixcloud', 'guardoserie', 'guardahd', 'animeunity', 'animeworld', 'animesaturn', 'cinemacity', 'altadefinizionestreaming', 'netmirror'];
 
     for (const provider of providers) {
         const entryPoint = path.join(SRC_DIR, provider, 'index.js');
