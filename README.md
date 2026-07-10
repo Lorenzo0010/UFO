@@ -1,7 +1,7 @@
-# 🛸 UFO — Stremio Addon & Nuvio Plugin
+# 🛸 UFO — Stremio Addon
 
-> Addon Stremio e Plugin Nuvio che fornisce stream HLS da **VixSrc/VixCloud**, **VidXgo** e **AltadefinizioneStreaming**.
-> Supporta il deploy server-side (Stremio) su Koyeb/Docker e il bundling client-side (Nuvio) tramite GitHub Actions.
+> Addon Stremio che fornisce stream HLS da **VixSrc/VixCloud**, **VidXgo** e **AltadefinizioneStreaming**.
+> Supporta il deploy su Koyeb, Render o VPS tramite Docker.
 
 ---
 
@@ -13,7 +13,7 @@ L'autore non è responsabile di alcun utilizzo improprio, illegale o non autoriz
 Utilizzando questo progetto, l'utente accetta di assumersi la piena responsabilità delle proprie azioni e di rispettare le leggi vigenti nel proprio paese.
 
 - Questo addon **non ospita, non distribuisce e non indicizza** alcun contenuto multimediale
-- Funziona esclusivamente come **proxy di reindirizzamento** o **scraper client-side** verso sorgenti di terze parti pubblicamente accessibili
+- Funziona esclusivamente come **proxy di reindirizzamento** verso sorgenti di terze parti pubblicamente accessibili
 - L'autore **non ha alcun controllo** sui contenuti forniti da sorgenti esterne (VixSrc, VidXgo, TMDB, ecc.)
 - L'autore **non garantisce** la disponibilità, la legalità o la qualità dei contenuti raggiungibili tramite questo software
 - È responsabilità dell'utente verificare che l'utilizzo di questo software sia conforme alle leggi del proprio paese
@@ -29,40 +29,26 @@ Questo progetto nasce come studio pratico dei seguenti argomenti:
 - Sviluppo di API REST con **FastAPI** e Python asincrono
 - Integrazione con API di terze parti (**TMDB API**)
 - Architettura di addon per **Stremio** e il relativo protocollo
-- Sviluppo di plugin **Nuvio** eseguiti client-side nel browser
-- Bundling di moduli Node.js tramite **esbuild**
-- Deploy su piattaforma cloud moderna (**Koyeb**) e pipeline **GitHub Actions**
-- Strutturazione di progetti multi-ambiente (Node.js + Python)
+- Deploy su piattaforma cloud moderna (**Koyeb**)
+- Strutturazione di progetti Dockerizzati
 
 ---
 
-## 🚀 Come funziona e Doppio Funzionamento
+## 🚀 Come funziona
 
-UFO aggrega stream da tre provider in parallelo ed è stato progettato con un **doppio funzionamento** per due piattaforme distinte:
-
-### 1. Modalità Addon Stremio (Server-Side)
+UFO aggrega stream da tre provider in parallelo.
 Il backend in Python orchestrato da FastAPI esegue lo scraping e il fetch dai provider direttamente dal server. 
 Utilizza un **proxy HLS interno** che riscrive i manifest (m3u8) e inoltra i segmenti video per bypassare limitazioni CORS e blocchi regionali tipici dei browser e dei player TV.
-
-### 2. Modalità Plugin Nuvio (Client-Side)
-Il codice Javascript contenuto in `src/` viene analizzato e pacchettizzato tramite esbuild (grazie a `build.js`) per generare moduli browser-compatibili. Questi script vengono caricati ed eseguiti **direttamente dal client Nuvio** dell'utente (Smart TV, Smartphone, PC).
-Le richieste HTTP vengono effettuate nativamente tramite l'API `fetch` del dispositivo. Per questo motivo, solo i provider con supporto nativo CORS e senza blocchi Cloudflare troppo restrittivi sono attivati su Nuvio (es. VixCloud, VidXgo, AltadefinizioneStreaming).
 
 ---
 
 ## 📥 Installazione e Utilizzo
 
-### 🛸 Per Stremio
-Poiché la modalità Stremio richiede un server proxy per bypassare i CORS, devi eseguire l'addon su un server (o in locale):
+Poiché l'addon richiede un server proxy per bypassare i CORS e riscrivere i flussi video, devi eseguirlo su un server (o in locale):
+
 1. Fai il deploy del codice su un servizio di hosting (es. Koyeb, Render, VPS con Docker).
 2. Apri l'URL della tua istanza nel browser (es. `https://mio-ufo-server.koyeb.app`).
 3. Clicca sul pulsante **"Install on Stremio"** o copia il link e incollalo nella barra di ricerca degli Addon di Stremio.
-
-### 🎬 Per Nuvio
-Nuvio esegue il plugin direttamente nel client, quindi non serve un server. Puoi installarlo in un click o copiando il link:
-1. Copia questo link esatto: `https://raw.githubusercontent.com/Lorenzo0010/UFO/main/manifest.json`
-2. Apri Nuvio, vai nella sezione **Plugin / Estensioni**.
-3. Aggiungi il plugin incollando l'URL.
 
 ---
 
@@ -71,15 +57,6 @@ Nuvio esegue il plugin direttamente nel client, quindi non serve un server. Puoi
 ```text
 UFO/
 ├── api/                  # Backend Python per Stremio (FastAPI)
-├── src/                  # Sorgenti Javascript dei provider per Nuvio
-│   ├── altadefinizionestreaming/
-│   ├── vidxgo/
-│   ├── vixcloud/
-│   ├── extractors/
-│   └── utils/
-├── build.js              # Script esbuild per la pacchettizzazione Nuvio
-├── manifest.json         # Manifest principale del plugin Nuvio
-├── package.json          # Dipendenze Node.js (esbuild, crypto-js, ecc.)
 ├── Dockerfile            # Immagine Docker per deploy Stremio su VPS
 ├── Procfile              # Avvio per Koyeb: uvicorn api.index:app --port $PORT
 ├── requirements.txt      # Dipendenze Python
@@ -89,20 +66,6 @@ UFO/
 ---
 
 ## 💻 Sviluppo
-
-### Sviluppo Plugin Nuvio (Client-Side)
-
-Assicurati di avere Node.js installato.
-
-```bash
-npm install
-npm run build
-```
-Questo comando analizzerà il codice in `src/` e genererà la cartella `providers/` contenente i file JS compilati e pronti per essere letti da Nuvio.
-
-**GitHub Actions**: Il repository è configurato per compilare automaticamente i provider ad ogni push sul branch `main`. Nuvio andrà a leggere direttamente i file compilati.
-
-### Sviluppo Addon Stremio (Server-Side)
 
 ```bash
 # Installa le dipendenze Python
