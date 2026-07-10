@@ -1,7 +1,7 @@
 # 🛸 UFO — Stremio Addon
 
-> Addon Stremio che fornisce stream HLS da **VixSrc/VixCloud**, **VidXgo** e **AltadefinizioneStreaming**.
-> Supporta il deploy su Koyeb, Render o VPS tramite Docker.
+> Addon Stremio che fornisce stream HLS da **VixSrc/VixCloud** e **VidXgo**.
+> Supporta il deploy su Docker, CasaOS, Koyeb, Render o VPS.
 
 ---
 
@@ -29,26 +29,68 @@ Questo progetto nasce come studio pratico dei seguenti argomenti:
 - Sviluppo di API REST con **FastAPI** e Python asincrono
 - Integrazione con API di terze parti (**TMDB API**)
 - Architettura di addon per **Stremio** e il relativo protocollo
-- Deploy su piattaforma cloud moderna (**Koyeb**)
-- Strutturazione di progetti Dockerizzati
+- Deploy su piattaforme cloud moderne e orchestrazione con **Docker** e **CasaOS**
+- Strutturazione di un proxy HLS interno per flussi video
 
 ---
 
 ## 🚀 Come funziona
 
-UFO aggrega stream da tre provider in parallelo.
+UFO aggrega stream dai provider in parallelo.
 Il backend in Python orchestrato da FastAPI esegue lo scraping e il fetch dai provider direttamente dal server. 
 Utilizza un **proxy HLS interno** che riscrive i manifest (m3u8) e inoltra i segmenti video per bypassare limitazioni CORS e blocchi regionali tipici dei browser e dei player TV.
 
 ---
 
-## 📥 Installazione e Utilizzo
+## ⚙️ Variabili d'ambiente
 
-Poiché l'addon richiede un server proxy per bypassare i CORS e riscrivere i flussi video, devi eseguirlo su un server (o in locale):
+L'addon si configura tramite variabili d'ambiente (visibili nel file `.env.example`):
 
-1. Fai il deploy del codice su un servizio di hosting (es. Koyeb, Render, VPS con Docker).
-2. Apri l'URL della tua istanza nel browser (es. `https://mio-ufo-server.koyeb.app`).
-3. Clicca sul pulsante **"Install on Stremio"** o copia il link e incollalo nella barra di ricerca degli Addon di Stremio.
+| Variabile | Obbligatoria | Descrizione |
+| :--- | :---: | :--- |
+| `TMDB_KEY` | ✅ **Sì** | Chiave API di TheMovieDB, necessaria per risolvere ID e metadati. |
+| `ADDON_BASE_URL` | ⚠️ *Consigliata* | URL pubblico/LAN dell'addon (es. `http://192.168.1.77:8080`). **Obbligatoria** se usi l'addon su dispositivi diversi dallo stesso server. |
+| `VIDXGO_ENABLED` | No | Abilita (`1`) o disabilita (`0`) il provider VidXgo. Default: `1`. |
+| `SC_DOMAIN` | No | Dominio personalizzato per VixSrc. Default: `https://vixsrc.to`. |
+| `VIDXGO_DOMAIN` | No | Dominio personalizzato per VidXgo. Default: `https://v.vidxgo.co`. |
+
+---
+
+## 📥 Installazione e Deploy
+
+L'addon richiede un server per bypassare i CORS e riscrivere i flussi video. Una volta installato, apri l'URL della tua istanza nel browser e clicca su **"Install on Stremio"**.
+
+### 🐳 CasaOS / ZimaBoard
+Il progetto include il supporto nativo per CasaOS.
+Se hai CasaOS, puoi installare l'addon importando il file `docker-compose.yml` direttamente dall'App Store personalizzato o tramite l'interfaccia di installazione custom, le icone e i metadati verranno rilevati in automatico.
+
+### 🐳 Docker Compose (VPS / Server locale)
+```bash
+docker compose up -d
+```
+
+### ☁️ Cloud (Koyeb, Render)
+Puoi fare il deploy diretto tramite Dockerfile o usando il `Procfile` incluso per le piattaforme compatibili. Assicurati di impostare la variabile `TMDB_KEY` nelle impostazioni del servizio cloud.
+
+---
+
+## 💻 Sviluppo in locale
+
+```bash
+# Clona il repository e posizionati nella cartella
+git clone <url-repo> && cd UFO
+
+# Installa le dipendenze Python
+pip install -r requirements.txt
+
+# Crea il file .env partendo dall'esempio
+cp .env.example .env
+
+# Modifica il file .env inserendo la tua TMDB_KEY
+
+# Avvia il server di sviluppo (FastAPI)
+uvicorn api.index:app --reload --port 8080
+```
 
 ---
 
@@ -57,25 +99,10 @@ Poiché l'addon richiede un server proxy per bypassare i CORS e riscrivere i flu
 ```text
 UFO/
 ├── api/                  # Backend Python per Stremio (FastAPI)
-├── Dockerfile            # Immagine Docker per deploy Stremio su VPS
-├── Procfile              # Avvio per Koyeb: uvicorn api.index:app --port $PORT
+├── Dockerfile            # Immagine Docker per il deploy
+├── docker-compose.yml    # Configurazione per Docker e CasaOS
+├── Procfile              # Avvio per Koyeb
 ├── requirements.txt      # Dipendenze Python
+├── .env.example          # Template per variabili d'ambiente
 └── README.md
 ```
-
----
-
-## 💻 Sviluppo
-
-```bash
-# Installa le dipendenze Python
-pip install -r requirements.txt
-
-# Crea il file .env per le variabili d'ambiente
-cp .env.example .env
-
-# Avvia il server di sviluppo (FastAPI)
-uvicorn api.index:app --reload --port 8080
-```
-
-
