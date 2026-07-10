@@ -59,10 +59,10 @@ Poiché la modalità Stremio richiede un server proxy per bypassare i CORS, devi
 3. Clicca sul pulsante **"Install on Stremio"** o copia il link e incollalo nella barra di ricerca degli Addon di Stremio.
 
 ### 🎬 Per Nuvio
-Nuvio esegue il plugin direttamente nel client, quindi non serve un server:
-1. Copia l'URL raw del file `manifest.json` di questo repository (o della tua fork hostata su GitHub Pages/Raw).
+Nuvio esegue il plugin direttamente nel client, quindi non serve un server. Puoi installarlo in un click o copiando il link:
+1. Copia questo link esatto: `https://raw.githubusercontent.com/Lorenzo0010/UFO/main/manifest.json`
 2. Apri Nuvio, vai nella sezione **Plugin / Estensioni**.
-3. Aggiungi il plugin incollando l'URL del manifest.
+3. Aggiungi il plugin incollando l'URL.
 
 ---
 
@@ -115,29 +115,4 @@ cp .env.example .env
 uvicorn api.index:app --reload --port 8080
 ```
 
----
 
-## 📋 Changelog
-
-### [2.0.0] — 2026-07
-> Dual-Support Nuvio e Pulizia Provider
-
-- **feat**: Aggiunto supporto nativo al plugin **Nuvio**, con esecuzione client-side nel browser.
-- **feat**: Pipeline esbuild (`build.js`) e `package.json` integrati per raggruppare i file JS.
-- **feat**: Aggiunta la CI/CD via GitHub Actions per pacchettizzare il codice su ogni push.
-- **refactor**: Eliminati i provider bloccati da Cloudflare o non compatibili nativamente (Guardoserie, AnimeUnity, AnimeSaturn, NetMirror, ecc.).
-- **refactor**: Mantenuti e stabilizzati i tre provider autonomi primari: **VixCloud, VidXgo e AltadefinizioneStreaming**.
-- **fix**: Sostituiti moduli Node.js-only (`axios`, `fs`, `https`) con un fallback sicuro nativo (`fetch`) per il client browser.
-- **chore**: Riordinata la lista dei provider nel `manifest.json`.
-
-### [1.7.0] — 2026-06
-> Rimozione EasyProxy, Fix Proxy e Porting
-
-- **refactor**: rimossa completamente la dipendenza da EasyProxy per Stremio.
-- **fix**: aggiornato Dockerfile per esporre la porta 8080.
-
-### [1.6.0] — 2026-06
-> Proxy HLS interno e VidXgo
-
-- **feat**: proxy HLS interno (`api/proxy.py`).
-- **feat**: aggiunto provider VidXgo (`api/vidxgo.py`).
