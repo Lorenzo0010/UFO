@@ -1,4 +1,4 @@
-﻿# 🛸 UFO — Stremio Addon & Nuvio Plugin
+# 🛸 UFO — Stremio Addon & Nuvio Plugin
 
 > Addon Stremio e Plugin Nuvio che fornisce stream HLS da **VixSrc/VixCloud**, **VidXgo** e **AltadefinizioneStreaming**.
 > Supporta il deploy server-side (Stremio) su Koyeb/Docker e il bundling client-side (Nuvio) tramite GitHub Actions.
@@ -36,22 +36,39 @@ Questo progetto nasce come studio pratico dei seguenti argomenti:
 
 ---
 
-## Come funziona
+## 🚀 Come funziona e Doppio Funzionamento
 
-UFO aggrega stream da tre provider in parallelo. Può essere utilizzato in due modalità:
+UFO aggrega stream da tre provider in parallelo ed è stato progettato con un **doppio funzionamento** per due piattaforme distinte:
 
 ### 1. Modalità Addon Stremio (Server-Side)
-Il backend in Python orchestrato da FastAPI esegue il fetch dai provider direttamente dal server. Utilizza un **proxy HLS interno** che riscrive i manifest e inoltra i segmenti video per bypassare limitazioni CORS e blocchi regionali.
+Il backend in Python orchestrato da FastAPI esegue lo scraping e il fetch dai provider direttamente dal server. 
+Utilizza un **proxy HLS interno** che riscrive i manifest (m3u8) e inoltra i segmenti video per bypassare limitazioni CORS e blocchi regionali tipici dei browser e dei player TV.
 
 ### 2. Modalità Plugin Nuvio (Client-Side)
-Il codice Javascript contenuto in src/ viene analizzato e pacchettizzato tramite esbuild (grazie a uild.js) per generare moduli browser-compatibili caricati direttamente dal client Nuvio dell'utente (Smart TV, Telefono, PC).
-Le richieste vengono effettuate nativamente tramite l'API etch del dispositivo. Solo i provider con supporto nativo e senza blocchi Cloudflare restrittivi (VixCloud, VidXgo, AltadefinizioneStreaming) sono attivati per Nuvio.
+Il codice Javascript contenuto in `src/` viene analizzato e pacchettizzato tramite esbuild (grazie a `build.js`) per generare moduli browser-compatibili. Questi script vengono caricati ed eseguiti **direttamente dal client Nuvio** dell'utente (Smart TV, Smartphone, PC).
+Le richieste HTTP vengono effettuate nativamente tramite l'API `fetch` del dispositivo. Per questo motivo, solo i provider con supporto nativo CORS e senza blocchi Cloudflare troppo restrittivi sono attivati su Nuvio (es. VixCloud, VidXgo, AltadefinizioneStreaming).
 
 ---
 
-## Struttura del progetto
+## 📥 Installazione e Utilizzo
 
-`
+### 🛸 Per Stremio
+Poiché la modalità Stremio richiede un server proxy per bypassare i CORS, devi eseguire l'addon su un server (o in locale):
+1. Fai il deploy del codice su un servizio di hosting (es. Koyeb, Render, VPS con Docker).
+2. Apri l'URL della tua istanza nel browser (es. `https://mio-ufo-server.koyeb.app`).
+3. Clicca sul pulsante **"Install on Stremio"** o copia il link e incollalo nella barra di ricerca degli Addon di Stremio.
+
+### 🎬 Per Nuvio
+Nuvio esegue il plugin direttamente nel client, quindi non serve un server:
+1. Copia l'URL raw del file `manifest.json` di questo repository (o della tua fork hostata su GitHub Pages/Raw).
+2. Apri Nuvio, vai nella sezione **Plugin / Estensioni**.
+3. Aggiungi il plugin incollando l'URL del manifest.
+
+---
+
+## 📂 Struttura del progetto
+
+```text
 UFO/
 ├── api/                  # Backend Python per Stremio (FastAPI)
 ├── src/                  # Sorgenti Javascript dei provider per Nuvio
@@ -67,38 +84,36 @@ UFO/
 ├── Procfile              # Avvio per Koyeb: uvicorn api.index:app --port $PORT
 ├── requirements.txt      # Dipendenze Python
 └── README.md
-`
+```
 
 ---
 
-## Sviluppo Plugin Nuvio
+## 💻 Sviluppo
 
-### Costruzione Locale
+### Sviluppo Plugin Nuvio (Client-Side)
+
 Assicurati di avere Node.js installato.
-`ash
+
+```bash
 npm install
 npm run build
-`
-Questo genererà la cartella providers/ contenente il codice pronto per Nuvio.
+```
+Questo comando analizzerà il codice in `src/` e genererà la cartella `providers/` contenente i file JS compilati e pronti per essere letti da Nuvio.
 
-### GitHub Actions
-Il repository è configurato per compilare automaticamente i provider ad ogni push sul branch main.
-Nuvio andrà a leggere direttamente i file compilati dalla cartella providers/ esposta tramite GitHub Pages o Raw.
+**GitHub Actions**: Il repository è configurato per compilare automaticamente i provider ad ogni push sul branch `main`. Nuvio andrà a leggere direttamente i file compilati.
 
----
+### Sviluppo Addon Stremio (Server-Side)
 
-## Sviluppo Addon Stremio
-
-`ash
-# Installa dipendenze Python
+```bash
+# Installa le dipendenze Python
 pip install -r requirements.txt
 
-# Crea il file .env
+# Crea il file .env per le variabili d'ambiente
 cp .env.example .env
 
-# Avvia il server
+# Avvia il server di sviluppo (FastAPI)
 uvicorn api.index:app --reload --port 8080
-`
+```
 
 ---
 
@@ -108,12 +123,12 @@ uvicorn api.index:app --reload --port 8080
 > Dual-Support Nuvio e Pulizia Provider
 
 - **feat**: Aggiunto supporto nativo al plugin **Nuvio**, con esecuzione client-side nel browser.
-- **feat**: Pipeline esbuild (uild.js) e package.json integrati per raggruppare i file JS.
+- **feat**: Pipeline esbuild (`build.js`) e `package.json` integrati per raggruppare i file JS.
 - **feat**: Aggiunta la CI/CD via GitHub Actions per pacchettizzare il codice su ogni push.
 - **refactor**: Eliminati i provider bloccati da Cloudflare o non compatibili nativamente (Guardoserie, AnimeUnity, AnimeSaturn, NetMirror, ecc.).
 - **refactor**: Mantenuti e stabilizzati i tre provider autonomi primari: **VixCloud, VidXgo e AltadefinizioneStreaming**.
-- **fix**: Sostituiti moduli Node.js-only (xios, s, https) con un fallback sicuro nativo (etch) per il client browser.
-- **chore**: Riordinata la lista dei provider nel manifest.json.
+- **fix**: Sostituiti moduli Node.js-only (`axios`, `fs`, `https`) con un fallback sicuro nativo (`fetch`) per il client browser.
+- **chore**: Riordinata la lista dei provider nel `manifest.json`.
 
 ### [1.7.0] — 2026-06
 > Rimozione EasyProxy, Fix Proxy e Porting
@@ -124,5 +139,5 @@ uvicorn api.index:app --reload --port 8080
 ### [1.6.0] — 2026-06
 > Proxy HLS interno e VidXgo
 
-- **feat**: proxy HLS interno (pi/proxy.py).
-- **feat**: aggiunto provider VidXgo (pi/vidxgo.py).
+- **feat**: proxy HLS interno (`api/proxy.py`).
+- **feat**: aggiunto provider VidXgo (`api/vidxgo.py`).
